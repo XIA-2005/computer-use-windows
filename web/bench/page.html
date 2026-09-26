@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>cu web bench</title>
+<style>
+ body{font-family:system-ui,sans-serif;margin:24px;line-height:1.5}
+ .card{border:1px solid #ccc;padding:12px;margin:12px 0;width:520px}
+ .hidden{display:none}
+ .ghost{visibility:hidden}
+ #overlay{position:fixed;left:0;top:0;width:260px;height:120px;background:rgba(200,0,0,.35);z-index:9}
+ #menu{display:none;border:1px solid #888;padding:6px;width:160px;background:#fff}
+ #menu.open{display:block}
+ #log{white-space:pre-wrap;font:12px/1.4 monospace;background:#f6f6f6;padding:8px;height:120px;overflow:auto}
+ button{margin:2px}
+ .icon{width:32px;height:32px;border:1px solid #666;background:#eee}
+ #late{color:green}
+ #editor{border:1px solid #999;min-height:40px;padding:6px}
+ .pad{height:1400px;background:linear-gradient(#fff,#eee)}
+</style>
+</head>
+<body>
+<h1>cu web bench page</h1>
+<div id="overlay"></div>
+<div class="card">
+ <p>Nested button: <button id="b1" onclick="log('b1 click')"><span>提交</span><span>订单</span></button></p>
+ <p>Duplicate text: <button class="hidden" onclick="log('WRONG hidden dup')">重复项</button> <button id="dupv" onclick="log('dupv click')">重复项</button> <button class="ghost" onclick="log('WRONG ghost dup')">重复项</button></p>
+ <p>Card link: <span>更多信息请点击 <a id="lm" href="#lm" onclick="log('lm click');return false">Learn more</a> 或者其它内容</span></p>
+ <p>Icon button (aria-label only): <button id="ic" class="icon" aria-label="搜索" onclick="log('ic click')"></button>
+    <input id="tt" type="text" title="标题输入" placeholder="请输入关键词">
+    <label for="lab">带标签的框</label><input id="lab" type="text"></p>
+ <p>Plain div: <div id="dv" style="cursor:pointer;width:120px;border:1px dashed #999" onclick="log('dv click')">纯 div 按钮</div></p>
+ <p>Mousedown menu: <button id="mb">打开菜单</button></p>
+ <div id="menu"><div class="mi" onclick="log('menu item 1')">菜单项一</div><div class="mi" onclick="log('menu item 2')">菜单项二</div></div>
+ <p>Hover state: <button id="hv">悬停我</button> <span id="hvs">no-hover</span></p>
+ <p>Controlled-like input: <input id="q" type="text"> <span id="qv"></span></p>
+ <p>Textarea: <textarea id="ta" rows="2"></textarea></p>
+ <p>Select: <select id="sl"><option value="a">选项A</option><option value="b">选项B</option></select></p>
+ <p>Contenteditable: <div id="editor" contenteditable="true"></div></p>
+ <p><button id="lateBtn" onclick="setTimeout(function(){var e=document.createElement('div');e.id='late';e.textContent='延迟出现的元素';document.getElementById('lateHost').appendChild(e)},350)">300ms 后出现</button> <span id="lateHost"></span></p>
+ <p><a id="nav" href="#navigated" onclick="log('nav click')">跳转链接</a></p>
+</div>
+<div class="pad">long page filler</div>
+<div class="card"><button id="bottom" onclick="log('bottom click')">页面底部按钮</button></div>
+<div id="log"></div>
+<script>
+ function log(m){var l=document.getElementById('log');l.textContent+=m+'\n';window.__last=m;}
+ document.getElementById('mb').addEventListener('mousedown',function(){document.getElementById('menu').classList.add('open');log('menu opened (mousedown)');});
+ document.getElementById('hv').addEventListener('mouseover',function(){document.getElementById('hvs').textContent='hovered';});
+ var q=document.getElementById('q');q.addEventListener('input',function(e){document.getElementById('qv').textContent='input:'+q.value+' type:'+(e.inputType||'-');});
+ q.addEventListener('keyup',function(e){window.__keyup=(window.__keyup||0)+1;});
+ q.addEventListener('keydown',function(e){if(e.key==='Enter')log('enter on q: '+q.value);});
+ document.getElementById('editor').addEventListener('input',function(e){window.__edInput=(e.inputType||'-');});
+ window.__events=[];['pointerdown','mousedown','mouseup','click'].forEach(function(t){document.getElementById('b1').addEventListener(t,function(){window.__events.push(t);});});
+</script>
+</body>
+</html>

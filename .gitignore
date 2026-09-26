@@ -1,0 +1,8 @@
+# runtime state: screenshots, frame files, dedicated browser profiles (logins!) - never commit
+state/
+shots/
+# compiled C# cache, rebuilt on first run
+win/bin/
+# local backups of previous versions
+win/_v*_backup/
+*.tmp
