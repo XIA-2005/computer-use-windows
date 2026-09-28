@@ -39,7 +39,15 @@ $script:cfg = @{ MaxSide = 1568; MaxPixels = 1150000; Cap = 1.0 }   # defaults s
 function Import-Core {
   if ('CU.Core' -as [type]) { return }
   $srcs = @((Join-Path $script:here "cu.cs"), (Join-Path $script:here "uia.cs"), (Join-Path $script:here "web.cs"))
-  $joined = (($srcs | ForEach-Object { (Get-FileHash $_ -Algorithm MD5).Hash }) -join '|')
+  # Use raw .NET MD5 instead of Get-FileHash: Get-FileHash lives in
+  # Microsoft.PowerShell.Utility, which fails to resolve in Windows PowerShell 5.1
+  # child processes when PSModulePath is inherited from a PowerShell 7 session.
+  # The dash-stripped BitConverter.ToString output matches Get-FileHash's format
+  # exactly, so the resulting dll hash/cache name is unchanged.
+  $md5s = [Security.Cryptography.MD5]::Create()
+  try {
+    $joined = (($srcs | ForEach-Object { ([BitConverter]::ToString($md5s.ComputeHash([IO.File]::ReadAllBytes($_))).Replace('-', '')) }) -join '|')
+  } finally { $md5s.Dispose() }
   $hash = ([BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($joined)))).Replace('-', '').ToLowerInvariant().Substring(0, 12)
   $bin = Join-Path $script:here "bin"
   $dll = Join-Path $bin "cu-$hash.dll"
