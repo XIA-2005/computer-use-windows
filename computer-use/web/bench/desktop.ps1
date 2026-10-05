@@ -120,6 +120,9 @@ if ($disId) {
   Run "click -Id disabled -> ERR_DISABLED" @("click", "-Title", "CU-TEST-WINDOW", "-Id", "$disId") {
     param($j) if ($j.err -eq "ERR_DISABLED") { @("ok", "refused instead of blind-clicking") } else { @("FAIL", "err=$($j.err), want ERR_DISABLED") } } -WantErr | Out-Null
 } else { Write-Host "!! disabled button not found in element list" -ForegroundColor Red; $script:fails++ }
+# -Method uia without an element target must refuse, not quietly fall back to a coordinate click
+Run "click -X -Y -Method uia refused (needs element)" @("click", "-Title", "CU-TEST-WINDOW", "-Screen", "-X", "600", "-Y", "400", "-Method", "uia", "-Settle", "0") {
+  param($j) if ($j.err -eq "ERR_ARGS") { @("ok", "$($j.msg)") } else { @("FAIL", "err=$($j.err), want ERR_ARGS") } } -WantErr | Out-Null
 $fw = 0; $fh = 0
 if ($fr -and $fr.ok) { $fw = [int]$fr.frame.w; $fh = [int]$fr.frame.h }
 if ($fw -gt 100) {

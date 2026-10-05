@@ -708,6 +708,11 @@ function Invoke-Cu($a) {
       $fauto = $false
       if (-not $fg -and (Test-FgAuto $a $ctx.hw)) { $fg = $true; $fauto = $true }
       if ($fauto) { $ctx.chromium = $false } elseif (Test-Chromium $ctx.hw) { $ctx.chromium = $true }
+      # -Method uia is a forced request: refuse instead of silently doing something else (measured: a
+      # coordinate-only click and a foreground click both ignored it without a word)
+      if ($um -eq 'uia' -and ($null -eq $ctx.el -or $fg)) {
+        return (Err "ERR_ARGS" ("-Method uia needs the background element path: " + $(if ($null -eq $ctx.el) { "pass -Id (after snap -Marks) or -Name instead of -X/-Y" } else { "it cannot be combined with -Fg / CU_FG_AUTO; use -Method coord or drop -Fg" })))
+      }
       $j = $null
       # UIA direct control action: no coordinates, no background messages; a disabled element is refused
       if (-not $fg -and $um -ne 'coord' -and $null -ne $ctx.el -and $act -eq 'click' -and $btn -eq 'left' -and $mods -eq 0) {
@@ -788,18 +793,21 @@ function Invoke-Cu($a) {
       $useClip = ($m -eq 'clip' -or $m -eq 'paste') -or ($fg -and $m -eq 'auto' -and $t.Length -gt 400)
       if ($useClip) {
         $old = $null; try { $old = [CU.Core]::ClipGet() } catch { }
-        # a paste message can be processed before the control finished reacting to the focusing click, and some
-        # toolkits ignore the first one outright: verify with a synchronous read and paste again until it lands
+        # A paste can be processed before the control finished reacting to the focusing click, and some toolkits
+        # ignore the first one outright: verify with a synchronous read and paste again until it lands. Only the
+        # WM_GETTEXT read of a classic edit is authoritative enough to justify re-pasting - the UIA value can lag
+        # (then a retry would insert the text twice), so non-classic targets get one paste with a longer wait.
+        $auth = [bool]$script:verifyIsEdit
         $landed = $false
-        for ($try = 0; $try -lt 3 -and -not $landed; $try++) {
+        for ($try = 0; $try -lt $(if ($auth) { 3 } else { 1 }) -and -not $landed; $try++) {
           if ($havePt) { Sleep-Fast $(if ($try -eq 0) { 40 } else { 80 }) $(if ($try -eq 0) { 120 } else { 200 }) }
           if (-not [CU.Core]::ClipSet($t)) { return (Err "ERR_CLIPBOARD" "could not put the text on the clipboard") }
           $pr = if ($fg) { [CU.Core]::FgPaste($ctx.hw) } else { [CU.Core]::BgText($ctx.hw, $t, 'paste', $tgt) }
           if (IsErr $pr) { $j = $pr; break }
           $j = $pr
           $sw2 = [Diagnostics.Stopwatch]::StartNew()
-          while ($sw2.ElapsedMilliseconds -lt 150) {
-            if ($script:verifyIsEdit) {
+          while ($sw2.ElapsedMilliseconds -lt $(if ($auth) { 150 } else { 400 })) {
+            if ($auth) {
               $vt = [CU.Core]::TextOf($tgt)
               if ($null -ne $vt -and (Norm $vt).Contains((Norm $t))) { $landed = $true; break }
             }

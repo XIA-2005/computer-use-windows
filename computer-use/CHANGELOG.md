@@ -17,6 +17,7 @@
 - 剪贴板读回确认单轮预算 220→150ms（最坏 ≈600ms，确认机制保留）。
 - `web click` 校验失败路径如实返回 `warn`（补点后仍未命中 / 遮挡不可补点两种情形都明说，此前只更新 `verified` 不给提示）；`click -Name` 的 OCR 兜底同样返回 `hit_box`/`alts`（此前只有 `-Find` 有）。
 - `testwin.ps1` 增加禁用按钮；`desktop.ps1` 增加两条拒绝路径断言（ERR_DISABLED、ERR_UIA_ACT_FAILED），全链路 21 项。
+- 复核遗留项收口：`-Method uia` 在无元素目标（`-X/-Y`）或与 `-Fg`/`CU_FG_AUTO` 同用时改为 `ERR_ARGS`（此前静默做坐标点击，与"强制直调"的文档矛盾）；`Target.createTarget` 超时不再重发（`web open -NewTab` 超时重发会开两个标签，与 eval/insertText 同类的第 3 处）；`-Method clip` 的重复粘贴防护——只有经典编辑框（`WM_GETTEXT` 权威读）才重试粘贴，其他目标单次粘贴 + 更长等待（UIA 值滞后时重试会把文本插两遍）。
 
 ## 6.1.0（2026-10-05）— 更快更准：正确性修复 + 精度增强
 

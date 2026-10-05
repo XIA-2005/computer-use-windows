@@ -413,7 +413,7 @@ namespace CU
             if (pick == null)
             {
                 string cr;
-                string e = CoreCall(b, false, "Target.createTarget", "{\"url\":\"about:blank\"}", 5000, out cr);
+                string e = CoreCallEx(b, false, "Target.createTarget", "{\"url\":\"about:blank\"}", 5000, false, out cr);
                 if (e != null) return e;
                 Dictionary<string, object> cd = ParseD(cr);
                 c.targetId = cd == null ? "" : SN(cd, "targetId");
@@ -770,7 +770,7 @@ namespace CU
             if (url == "") return J.Err("ERR_ARGS", "web open needs -Url");
             Stopwatch sw = Stopwatch.StartNew();
             string cr;
-            string e = CoreCall(b, false, "Target.createTarget", "{\"url\":" + J.Q(url) + "}", 8000, out cr);
+            string e = CoreCallEx(b, false, "Target.createTarget", "{\"url\":" + J.Q(url) + "}", 8000, false, out cr);
             if (e != null) return e;
             Dictionary<string, object> cd = ParseD(cr);
             string tid = cd == null ? "" : SN(cd, "targetId");
