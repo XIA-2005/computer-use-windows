@@ -8,7 +8,7 @@ description: 操作 Windows 桌面应用与专用浏览器实例的原语工具�
 > **路径基准**：本文件位于分享包 / ZCode 插件的 `skills\computer-use\` 下。下文提到的 `win\`、`web\`、`state\` 一律相对于**分享包 / 插件根**（即本文件所在目录的上两级）；`cu.exe` 的完整相对路径 = 本技能目录的 `..\..\win\cu.exe`。
 
 > 定位：与具体应用无关的 Windows Computer Use 原语。截图交给**原生多模态模型直接看**，模型输出图上坐标，脚本负责把坐标**精确**映射回屏幕并注入。ShunCode 本体零改动。
-> 当前 v6.1（2026-10-05）：OCR 三级匹配（精确/归一化/模糊）与多候选一次识别、UIA 控件直调点击、动作返回命中框与候选、后台输入提速（全部带可回退开关）。完整版本历史见同目录 `CHANGELOG.md`，实测数据与 Electron 案例见同目录 `REFERENCE.md`。
+> 当前 v6.1（2026-10-05）：OCR 三级匹配（精确/归一化/模糊）与多候选一次识别、UIA 控件直调点击、动作返回命中框与候选、后台输入提速（全部带可回退开关）。完整版本历史见插件根的 `CHANGELOG.md`（技能目录上两级），实测数据与 Electron 案例见同目录 `REFERENCE.md`。
 
 ## 铁律（不变）
 
@@ -37,7 +37,7 @@ set CU="<技能目录>\..\..\win\cu.exe"
 
 1. 目标在**专用浏览器**里（或就是要开网页）→ 走 `web` 层：`-Id`（`web els` 编号）≈ `-Sel` > `-Text`（`-TextB64` 同义）> `web shot` 坐标。不截图、不 OCR，45–85ms/条。
 2. 桌面窗口 → 先 `snap -Marks` 看有没有编号：
-   - **有编号**（Win32 / WinForms / WPF / 资源管理器 / UWP / 多数 WinUI）→ `click -Id N`：默认走 **UIA 控件直调**（`method:"uia"`，按控件语义触发，不依赖坐标、不受遮挡影响），失败自动回退坐标点击（`method:"coord"`）；`-Method coord` 可强制坐标。元素被禁用会直接报 `ERR_DISABLED`，不会盲点。
+   - **有编号**（Win32 / WinForms / WPF / 资源管理器 / UWP / 多数 WinUI）→ `click -Id N`：默认走 **UIA 控件直调**（`method:"uia"`，按控件语义触发，不依赖坐标、不受遮挡影响）；控件不支持这些模式时自动回退坐标点击（`method:"coord"`），`-Method coord` 强制坐标、`-Method uia` 强制直调（失败直接报 `ERR_UIA_ACT_FAILED`，不回退）。UIA 响应超时（结果不确定，可能稍后才生效）时返回 `method:"uia-pending"` + `warn`，**不会**再补一次坐标点击（防双触发）——看 after 帧确认即可，别重复点。元素被禁用（缓存或实时判定）都会直接报 `ERR_DISABLED`，不会盲点。
    - **没编号 + 有文字** → `click -Find "文字"`：OCR 三级匹配（精确 → 归一化（去标点/全角）→ 模糊（易混字符 + 编辑距离≤1）），目标文不确切时用 `"保存|确定|Save"` 一次识别多个候选；返回里 `match` 说明命中级别，`hit_box`/`alts` 给出命中框和其它候选（不用再跑一次 OCR）。
    - **没编号 + 没文字**（画布/图片/自绘界面）→ 视觉坐标 `-X -Y`。
 3. **Chromium/Electron/Qt 窗口**（QQ、微信新版、VS Code、专用 Edge 等 `Chrome_WidgetWin_*`/`Qt*QWindow*`）：后台消息常被忽略 → 视觉坐标 + `-Find`，动作加 `-Fg`（**需当次许可**）；或设 `CU_FG_AUTO=1` 让这类窗口自动走前台（默认关，见「环境变量」）。后台动作没生效时返回里的 `hint` 会直接说明原因。
@@ -51,14 +51,14 @@ set CU="<技能目录>\..\..\win\cu.exe"
 | `snap` | 截窗口（或全屏）→ 图 + **帧文件** | `-Title/-Proc/-Hwnd` `-Out` `-Region x,y,w,h` `-Grid 100` `-MaxSide` `-Method auto/screen/print` `-Restore`；`-Marks`（控件编号图 `cur-marks.jpg` + 列表）/ `-Uia`（只要列表） |
 | `els` | 列出窗口的可交互控件（UIA）：`[编号,类型,名称,cx,cy,w,h]` | `-Text2`（含文本元素）`-UiaTimeout 1500` `-Size 上限`（默认 400） |
 | `zoom` | 以帧图上一点为中心，截**原生分辨率**放大图（自带网格），并成为新的当前帧 | `-X -Y -R 120 -ZoomSize 900` |
-| `click` / `double` / `rclick` / `mclick` | 点击 | `-X -Y`（帧图坐标）/ `-Id N`（marks 编号，默认 UIA 直调）/ `-Name 控件名`（UIA，找不到自动转 OCR）/ `-Find 文字`（OCR，支持 `"a|b"`）；`-Method auto\|uia\|coord`；`-Mods ctrl,shift`；`-Fg`；`-FgAuto`/`-BgForce`；`-Snap`；`-NoSnapTo` |
+| `click` / `double` / `rclick` / `mclick` | 点击 | `-X -Y`（帧图坐标）/ `-Id N`（marks 编号，默认 UIA 直调）/ `-Name 控件名`（UIA，找不到自动转 OCR）/ `-Find 文字`（OCR，支持 `"a|b"`）；`-Method auto\|uia\|coord`（uia=强制控件直调，失败报错不回退）；`-Mods ctrl,shift`；`-Fg`；`-FgAuto`/`-BgForce`；`-Snap`；`-NoSnapTo` |
 | `move` / `down` / `up` | 悬停 / 按下 / 抬起 | 同上 |
 | `drag` | 拖拽 | `-X -Y -X2 -Y2` |
 | `scroll` / `hscroll` | 滚轮（负=向下/向左） | `-X -Y -Wheel -3` |
 | `key` | 按键/组合键，空格分隔为序列 | `-Keys "ctrl+a delete"` `-Repeat n` |
 | `type` | 输入文字（给 `-X/-Id/-Name/-Find` 时先点击该控件再输入） | `-Text` / `-TextB64`（UTF-8 base64，中文最稳）/ `-TextFile`；`-X -Y` / `-Id` / `-Name` / `-Find`；`-Enter`；`-Verify`（读回核对：标准编辑框用 `WM_GETTEXT` 精确读，`source:"edit"`；其他控件走 UIA）；`-Method auto/replacesel/char/clip` |
 | `mark` | 点前预览：画准星 + 生成 4× 放大核对图 | `-X -Y` 或 `-Pts "x:y,x:y"`；`-Zoom 24`（0=不出放大图） |
-| `find` | OCR 找字，返回帧图坐标（中心 cx,cy）；`match`=命中级别（exact/norm/fuzzy）、`pass`（plain/prep）、`cached`（画面未变，复用上次识别） | `-Find 文字`（或 `"a\|b\|c"` 多候选、`-FindB64`）`-Index n` `-Strict`（关闭模糊级）`-Region x,y,w,h`（只识别帧图的一块，快 3–8 倍）`-Method auto/screen/print`（老程序文字 OCR 不准时用 print，见 REFERENCE）`-Lang zh-Hans-CN` |
+| `find` | OCR 找字，返回帧图坐标（中心 cx,cy）；`match`=命中级别（exact/norm/fuzzy）、`pass`（plain/prep）、`cached`（画面未变，复用上次识别） | `-Find 文字`（或 `"a\|b\|c"` 多候选、`-FindB64`）`-Index n` `-Strict`（只认精确子串，跳过归一化与模糊两级）`-Region x,y,w,h`（只识别帧图的一块，快 3–8 倍）`-Method auto/screen/print`（老程序文字 OCR 不准时用 print，见 REFERENCE）`-Lang zh-Hans-CN` |
 | `ocr` | 全部文字行 + 坐标（帧图坐标） | `-Path 图片`（识别指定图片）；`-Region x,y,w,h`（只识别帧图一块，快）；`-Method auto/screen/print`；`-Max 行数`（默认 300，超出给 `truncated:true`）；`-Lang` |
 | `wait` | 等文字出现 / 等画面稳定 / 固定等待 | `-Find 文字 -Timeout 8000` / `-Stable` / `-Ms 300` |
 | `activate` | 把目标窗口置前（前台模式前用） | |
@@ -68,7 +68,7 @@ set CU="<技能目录>\..\..\win\cu.exe"
 
 通用：`-Frame <帧文件或图片路径>` 指定用哪张截图的坐标系（默认最近一次 snap/zoom）；`-Screen` 表示坐标是物理屏幕像素；`-Force` 跳过窗口移动检查；`-Settle 毫秒` 动作后最多等多久画面稳定（默认 1000，0=不等）；`-Quiet 毫秒` 动作后这么久画面（整窗 + 点击点周围局部）都没变化就提前返回（默认 250，可用 `CU_SETTLE_QUIET` 改默认）；`-Lang` OCR 语言；`-Size` 列表上限；`-Max` 文本/行数上限；`-UiaForce` 强制重试被记忆为"UIA 不可用"的进程。
 
-动作返回里的关键字段：`changed`/`roi_changed`（画面变化 %）、`settled`（已稳定）、`no_change`（quiet 窗口内毫无变化，多半没生效）、`method`（uia/coord）、`in_client`（点是否在客户区）、`fg_auto`（自动前台）、`hint`（失败原因与下一步建议）、`verify.contains`（读回核对）、`after`（`-Snap` 的新帧）。
+动作返回里的关键字段：`changed`/`roi_changed`（画面变化 %）、`settled`（已稳定）、`no_change`（quiet 窗口内毫无变化，多半没生效）、`method`（`uia` 直调成功 / `uia-pending` 结果不确定-看帧勿重复点 / `coord` 坐标点击）、`in_client`（点是否在客户区）、`fg_auto`（自动前台）、`hint`（失败原因与下一步建议）、`hit_box`/`alts`（`-Find`/`-Name` 的命中框与其它候选）、`verify.contains`（读回核对）、`after`（`-Snap` 的新帧）。
 
 别名：`dbl`=`double`、`rclick`/`mclick`=`click`（右/中键）；web 子命令 `go`/`nav`=`open`、`locate`=`find`、`txt`=`text`、`value`=`val`、`elements`=`els`、`forward`=`fwd`；`type -Method paste` 等于 `-Method clip`。
 
@@ -93,7 +93,7 @@ $CU type -X 300 -Y 400 -TextB64 5L2g5aW9 -Enter # 3. 点输入框 + 输入 + 回
 
 - **一动一截**：动作加上 `-Snap`（也可 `-Snap -Marks`），返回里的 `after` 就是动作后的新帧，下一步直接用，不用再单独 snap。返回里的 `changed`（画面变化百分比）、`settled`、`no_change` 用来判断：`no_change:true`（quiet 窗口内毫无变化，默认 250ms）说明这次点击多半没生效，同时会带 `hint` 说明原因（非客户区 / Chromium 忽略后台输入 / 慢应用可加 `-Quiet 600` 再看）。
 - **有文字就用文字定位**：按钮/菜单/链接上有字时优先 `click -Find "保存"`（OCR 在原生分辨率上找字，比目测坐标更准），文不确切时用 `click -Find "保存|确定|Save"` 一次试多个候选；返回的 `match`（exact/norm/fuzzy）告诉你命中的是哪种级别，`alts` 是其它候选。
-- **连续的确定动作用 `do` 批量执行**（一次进程、零启动开销；批内默认为不等待画面 `Settle=0`），最后一步加 `"Snap":true`：
+- **连续的确定动作用 `do` 批量执行**（一次进程、零启动开销；批内默认为不等待画面 `Settle=0`——这些步骤没有 `changed`/`no_change`/`hint`，成败只能靠末步 `"Snap":true` 的新帧判断），最后一步加 `"Snap":true`：
   ```bash
   $CU do -Title "记事本" -Steps '[{"cmd":"key","Keys":"ctrl+a"},{"cmd":"type","Text":"hello"},{"cmd":"key","Keys":"ctrl+s","Snap":true}]'
   ```
@@ -140,7 +140,7 @@ $CU web stop                                     # 用完关掉整个实例
 ```
 
 - **定位优先级**：`-Id`（els/shot -Marks 编号，最准）≈ `-Sel`（CSS）> `-Text`（按字，含 aria-label/title/placeholder/label/alt）> 截图坐标（canvas/地图/验证码才用）。`-Text` 命中多个时按「整段相等 > 前缀 > 包含、可交互元素优先、刚填过字的表单同组优先、可见优先、面积小优先」排序，`-Index n` 取第 n 个；结果里的 `count`/`alts` 告诉你有没有歧义。
-- **点击返回值**：`method:"mouse"` = 真实鼠标事件已发出；`verified:true` = 派发后该点仍命中目标元素；`verified:false` + `cover` = 页面滚动/动画让点落空（`retried:true` 表示已自动重新定位补点一次；元素已消失说明多半是跳转，属于成功）；`method:"js"` + `warn` = 中心点被 `cover` 挡住或浏览器窗口最小化，已改用 DOM click——这时先看一眼 `cover` 是什么，弹窗就先关掉。
+- **点击返回值**：`method:"mouse"` = 真实鼠标事件已发出；`verified:true` = 派发后该点仍命中目标元素；`verified:false` + `cover` = 页面滚动/动画让点落空（`retried:true` 表示已自动重新定位补点一次；补点仍没命中，或落点后不可重试的情形——遮挡/出屏/静态未命中——返回里都带 `warn` 如实说明，先看帧再继续；元素已消失说明多半是跳转，属于成功）；`method:"js"` + `warn` = 中心点被 `cover` 挡住或浏览器窗口最小化，已改用 DOM click——这时先看一眼 `cover` 是什么，弹窗就先关掉。
 - **点击不会等跳转**：点完链接如需等待，接 `web wait -Ready` / `web wait -Url 子串` / `web wait -Stable`（`web open` 自带等待）。开了新标签会自动跟过去（返回 `newTab`），跑完记得 `web close` 收拾，或 `web tab -Index N` 切回。
 - **回车提交要核对**：`type -Enter` 后用 `wait -Url/-Sel` 确认真的走了；刚 `open` 完的页面脚本可能还没挂好监听（必应偶发），没反应就 `click` 搜索按钮，或 `wait -Stable` 后重试。
 - **专用实例是独立账号环境**：知乎/京东/微博这类要登录或有风控的站会跳登录页或验证页（`open` 返回的 `url`/`title` 能看出来）；它不会、也不该借用你日常浏览器里的登录态。Cloudflare「正在进行安全验证」页通常几秒后自动过，用 `wait -Find 目标文字 -Timeout 15000` 等。
@@ -159,7 +159,7 @@ $CU type -Id 6 -TextB64 5L2g5aW9 -Verify   # 输入后读回内容，返回 veri
 ```
 
 - 看图决策时优先看 `cur-marks.jpg`，目标有编号就用 `-Id`（默认走 UIA 直调，见下），没有编号（画布、图片、自绘界面）再用坐标。
-- **`-Id` 默认按控件语义触发**（`click -Id N` → UIA `Invoke/Toggle/Select/Expand`，返回 `method:"uia"`、`via:"invoke"` 等）：不依赖坐标、不受遮挡影响，复选框/标签页/菜单项这类控件尤其可靠；控件被禁用时返回 `ERR_DISABLED` 而不是盲点。控件不支持这些模式时自动回退坐标点击（`method:"coord"`）。想强制坐标用 `-Method coord`。
+- **`-Id` 默认按控件语义触发**（`click -Id N` → UIA `Invoke/Toggle/Select/Expand`，返回 `method:"uia"`、`via:"invoke"` 等）：不依赖坐标、不受遮挡影响，复选框/标签页/菜单项这类控件尤其可靠；控件被禁用（列表缓存或实时判定）返回 `ERR_DISABLED` 而不是盲点。控件不支持这些模式时自动回退坐标点击（`method:"coord"`）；直调 800ms 没有确认（结果不确定，可能稍后生效）返回 `method:"uia-pending"` + `warn`，不补坐标点击——先看 after 帧，别重复点。`-Method coord` 强制坐标、`-Method uia` 强制直调（失败报 `ERR_UIA_ACT_FAILED` 不回退）。
 - **坐标吸附**：当前帧有控件列表时（`snap -Marks/-Uia` 之后），`click -X -Y` 落在控件内会在返回中注明 `on`；偏出控件 ≤6 图像像素时自动吸到最近控件中心（`snapped_to`）。`-NoSnapTo` 关闭。
 - `-Id` 只对产生它的那一帧有效：窗口移动/重截后要重新 `snap -Marks`（否则 `ERR_NO_MARKS` / `ERR_STALE_FRAME`）。
 - UIA 调用有超时（默认 1.5s，`-UiaTimeout`），超时返回空列表不会卡住；某进程连续超时会被记 10 分钟"UIA 不可用"（`els`/`-Name`/`snap -Marks` 跳过它直接走 OCR，省掉每次 1.5s），要重试加 `-UiaForce`。
@@ -183,7 +183,7 @@ $CU type -Id 6 -TextB64 5L2g5aW9 -Verify   # 输入后读回内容，返回 veri
 - 后台 `type` 默认 `-Method auto`：标准 Win32 编辑框用 `EM_REPLACESEL`（直接写入，中文/长文本一次完成，最可靠），其他控件逐字发 `WM_CHAR`。键盘消息发给**获得焦点的子控件**（v2 只发给顶层窗口，所以很多程序收不到）。
 - `type -Id N` / `-Name` 会**先点击该控件**再输入（与文档一致）；只用 `-X -Y` 也可以。
 - `-Method clip`：走系统剪贴板（原生 API，很快），`-Verify` 时读回确认后才恢复用户原来的剪贴板内容。
-- 前台 `-Fg`：用 `SendInput` 发 Unicode 字符（不依赖输入法、不占剪贴板；emoji 等代理对已验证可正常输入）；超过 400 字自动改为粘贴。输入过程中焦点被切走会立即停止（`ERR_FOCUS_LOST`），不会打到别的窗口。
+- 前台 `-Fg`：用 `SendInput` 发 Unicode 字符（不依赖输入法、不占剪贴板；emoji 等代理对按"两按同批后两放"成对发送，严格控件也不丢字）；超过 400 字自动改为粘贴。输入过程中焦点被切走会立即停止（`ERR_FOCUS_LOST`），不会打到别的窗口。
 - **`-Verify` 与 `-Enter` 同时给时不会读回核对**（回车后焦点可能已跳走）：要核对就分两条命令（先 `type -Verify`，再 `key enter`）。
 - 中文或包含特殊字符的文本请用 `-TextB64`（UTF-8 base64），避免 shell 转义和编码问题。
 - `key` 在后台模式下：标准编辑框的 `ctrl+a/c/v/x/z` 直接走编辑消息（100% 生效）；其他程序的组合键是模拟的，部分程序会忽略（返回里有 `warn`）→ 用截图确认，不生效再按下面的规则切换到 `-Fg`。
@@ -219,6 +219,7 @@ $CU type -Id 6 -TextB64 5L2g5aW9 -Verify   # 输入后读回内容，返回 veri
 | `ERR_NOFOCUS` / `ERR_OCCLUDED` / `ERR_FOCUS_LOST` | 前台模式的安全拦截，什么都没发送或已停止 |
 | `ERR_NO_MARKS` / `ERR_NO_ELEMENT` | 当前帧没有控件列表 / 没有这个编号 → `snap -Marks` |
 | `ERR_DISABLED` | UIA 直调发现控件被禁用（灰按钮）→ 先满足启用条件，不要盲点 |
+| `ERR_UIA_ACT_FAILED` | `-Method uia` 强制直调失败（控件不支持这些触发模式或已消失）→ 去掉 `-Method uia` 让它回退坐标，或 `-Fg`（需许可） |
 | `ERR_STEP` / `ERR_EXCEPTION` | `do` 第 N 步失败（返回带 `step` 下标和各步结果）/ 未捕获异常（看 msg） |
 | `ERR_DAEMON` | 常驻进程中途退出 → 重试一次；仍失败设 `CU_NODAEMON=1` |
 | `ERR_LOAD` | C# 编译失败（通常是 cu.cs / uia.cs 被改坏了） |

@@ -1,5 +1,14 @@
 # Changelog
 
+## 6.1.0 实现复核修正（2026-10-05，独立审计后追加）
+
+- **UIA 直调的线程治理与结果三态**：`Act` 与 `Collect` 共用僵尸判龄/线程计数（此前每次超时的直调会静默泄漏一个 UIA 线程）；直调结果不确定（超时/占用）时返回 `method:"uia-pending"` + `warn`，**不再**补发坐标点击（此前可能在 UIA 稍后生效后造成双触发）；实时判定控件已禁用同样报 `ERR_DISABLED`（此前缓存显示"启用"而实际禁用时会回退坐标盲点）；`-Method uia` 为强制语义（失败报 `ERR_UIA_ACT_FAILED`，不静默回退），`auto`/`coord` 行为不变。
+- **emoji 代理对成对发送**：前台 `SendInput` 输入此前按码元逐个"按下+抬起"，现改为同一批内两按下、两抬起（严格控件拆半丢字的场景）；`desktop.ps1` 的 `-Fg` 读回断言覆盖。
+- **`Input.insertText` 超时不重发**：`web keys`/`OneKey` 两处中文与未知 token 的插入与此前 `Runtime.evaluate` 同策略修复（重发=文本插两遍）。
+- 剪贴板读回确认单轮预算 220→150ms（最坏 ≈600ms，确认机制保留）。
+- `web click` 校验失败路径如实返回 `warn`（补点后仍未命中 / 遮挡不可补点两种情形都明说，此前只更新 `verified` 不给提示）；`click -Name` 的 OCR 兜底同样返回 `hit_box`/`alts`（此前只有 `-Find` 有）。
+- `testwin.ps1` 增加禁用按钮；`desktop.ps1` 增加两条拒绝路径断言（ERR_DISABLED、ERR_UIA_ACT_FAILED），全链路 21 项。
+
 ## 6.1.0（2026-10-05）— 更快更准：正确性修复 + 精度增强
 
 正确性（P0）：
@@ -24,7 +33,7 @@
 
 更准（P2）：
 
-- **OCR 三级匹配**：精确子串 → 归一化（全角→半角、去标点/符号）→ 模糊（易混字符 0/O、1/l/I、5/S… 折叠 + 编辑距离 ≤1，查询 ≥4 字符）。命中带 `match:"exact|norm|fuzzy"`；`-Strict` 只走前两级。
+- **OCR 三级匹配**：精确子串 → 归一化（全角→半角、去标点/符号）→ 模糊（易混字符 0/O、1/l/I、5/S… 折叠 + 编辑距离 ≤1，查询 ≥4 字符）。命中带 `match:"exact|norm|fuzzy"`；`-Strict` 只走精确级（跳过归一化与模糊两级）。
 - **多候选一次识别**：`-Find "保存|确定|Save"`（`click -Find` / `find` / `wait -Find` 均支持），一次 OCR 服务多个候选并给出命中情况。
 - **点击返回带命中信息**：`click -Find` 返回 `hit_box`（命中框）、`match`、`alts`（其它候选文本 + 中心点），换目标不用再跑一次 OCR。
 - **UIA 控件直调点击**：`click -Id` / `-Name` 默认按控件语义触发（`Invoke/Toggle/SelectionItem/ExpandCollapse`，返回 `method:"uia"`），不受遮挡与坐标误差影响；控件禁用直接报 `ERR_DISABLED`；不支持时自动回退坐标点击（`method:"coord"`），`-Method coord` 可强制。
