@@ -49,6 +49,7 @@ namespace CU
         [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
         [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+        [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref POINT p);
         [DllImport("user32.dll")] public static extern IntPtr ChildWindowFromPointEx(IntPtr h, POINT p, uint flags);
         [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
@@ -56,6 +57,7 @@ namespace CU
         [DllImport("user32.dll", EntryPoint = "PostMessageW")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
         [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeoutS(IntPtr h, uint m, IntPtr w, string l, uint flags, uint timeout, out IntPtr result);
+        [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeoutSB(IntPtr h, uint m, IntPtr w, StringBuilder l, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
         [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
@@ -84,6 +86,16 @@ namespace CU
         [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
         [DllImport("gdi32.dll")] public static extern int SetStretchBltMode(IntPtr dc, int mode);
         [DllImport("gdi32.dll")] public static extern bool StretchBlt(IntPtr d, int dx, int dy, int dw, int dh, IntPtr s, int sx, int sy, int sw, int sh, uint rop);
+        [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr h);
+        [DllImport("user32.dll")] public static extern bool CloseClipboard();
+        [DllImport("user32.dll")] public static extern bool EmptyClipboard();
+        [DllImport("user32.dll")] public static extern IntPtr GetClipboardData(uint fmt);
+        [DllImport("user32.dll")] public static extern IntPtr SetClipboardData(uint fmt, IntPtr mem);
+        [DllImport("user32.dll")] public static extern bool IsClipboardFormatAvailable(uint fmt);
+        [DllImport("kernel32.dll")] public static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+        [DllImport("kernel32.dll")] public static extern IntPtr GlobalLock(IntPtr mem);
+        [DllImport("kernel32.dll")] public static extern bool GlobalUnlock(IntPtr mem);
+        [DllImport("kernel32.dll")] public static extern IntPtr GlobalFree(IntPtr mem);
     }
 
     public static class J
@@ -204,6 +216,11 @@ namespace CU
     {
         static readonly IntPtr PMV2 = new IntPtr(-4);
 
+        // pacing: fixed waits between injected events exist for finicky apps. CU_SLOW=1 restores the original,
+        // slower timings for the whole process (the escape hatch when some app misses events after an update).
+        static readonly bool SlowInput = Environment.GetEnvironmentVariable("CU_SLOW") == "1";
+        public static int Pace(int fast, int slow) { return SlowInput ? slow : fast; }
+
         public static void Init()
         {
             try { N.SetProcessDpiAwarenessContext(PMV2); } catch { }
@@ -234,6 +251,65 @@ namespace CU
             StringBuilder sb = new StringBuilder(256);
             N.GetClassName(h, sb, 256);
             return sb.ToString();
+        }
+        // window class / owning process, for callers outside this class (fg-auto routing, UIA-unavailable memo)
+        public static string ClsOf(long hwnd) { return Cls(new IntPtr(hwnd)); }
+        public static long PidOf(long hwnd)
+        {
+            uint pid = 0;
+            IntPtr h = new IntPtr(hwnd);
+            if (h != IntPtr.Zero && N.IsWindow(h)) N.GetWindowThreadProcessId(h, out pid);
+            return pid;
+        }
+
+        // ---------------------------------------------------------------- clipboard (native: the PowerShell
+        // cmdlets cost 30-60 ms and marshalling each call through the pipeline; these are 1-2 ms)
+        const uint CF_UNICODETEXT = 13;
+
+        public static string ClipGet()
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                if (!N.IsClipboardFormatAvailable(CF_UNICODETEXT)) return null;
+                if (N.OpenClipboard(IntPtr.Zero))
+                {
+                    try
+                    {
+                        IntPtr h = N.GetClipboardData(CF_UNICODETEXT);
+                        if (h == IntPtr.Zero) return null;
+                        IntPtr p = N.GlobalLock(h);
+                        if (p == IntPtr.Zero) return null;
+                        try { return Marshal.PtrToStringUni(p); } finally { N.GlobalUnlock(h); }
+                    }
+                    finally { N.CloseClipboard(); }
+                }
+                Thread.Sleep(20);
+            }
+            return null;
+        }
+
+        public static bool ClipSet(string text)
+        {
+            if (text == null) return false;
+            for (int i = 0; i < 5; i++)
+            {
+                if (!N.OpenClipboard(IntPtr.Zero)) { Thread.Sleep(20); continue; }
+                try
+                {
+                    byte[] bytes = Encoding.Unicode.GetBytes(text + "\0");
+                    IntPtr mem = N.GlobalAlloc(0x0042, (UIntPtr)bytes.Length);   // GMEM_MOVEABLE | GMEM_ZEROINIT
+                    if (mem == IntPtr.Zero) return false;
+                    IntPtr p = N.GlobalLock(mem);
+                    if (p == IntPtr.Zero) { N.GlobalFree(mem); return false; }
+                    Marshal.Copy(bytes, 0, p, bytes.Length);
+                    N.GlobalUnlock(mem);
+                    if (!N.EmptyClipboard()) { N.GlobalFree(mem); continue; }
+                    if (N.SetClipboardData(CF_UNICODETEXT, mem) == IntPtr.Zero) { N.GlobalFree(mem); continue; }
+                    return true;   // ownership of mem passed to the clipboard
+                }
+                finally { N.CloseClipboard(); }
+            }
+            return false;
         }
 
         public static N.RECT Bounds(IntPtr h)
@@ -606,15 +682,17 @@ namespace CU
             }
             string used;
             Bitmap raw = Grab(h, src, method, out used);
-            // a just-restored / just-uncovered Chromium window can paint a flat placeholder for a few hundred ms
-            for (int tries = 0; h != IntPtr.Zero && raw != null && tries < 4 && LooksBlank(raw); tries++)
+            // a just-restored / just-uncovered Chromium window can paint a flat placeholder for a few hundred ms.
+            // Only a PrintWindow capture can be fooled like this - a screen grab is always the real pixels - so the
+            // retry (and the blank warning) is limited to print captures: a legitimately flat window costs nothing.
+            for (int tries = 0; raw != null && tries < 3 && used.StartsWith("print", StringComparison.Ordinal) && LooksBlank(raw); tries++)
             {
                 raw.Dispose();
-                Thread.Sleep(250);
+                Thread.Sleep(Pace(150, 250));
                 raw = Grab(h, src, method, out used);
             }
             if (raw == null) return J.Err("ERR_CAPTURE", used);
-            bool blank = h != IntPtr.Zero && LooksBlank(raw);
+            bool blank = raw != null && used.StartsWith("print", StringComparison.Ordinal) && LooksBlank(raw);
             int w = raw.Width, hh = raw.Height;
             double s = 1;
             if (scale > 0) s = scale;
@@ -681,10 +759,10 @@ namespace CU
             }
             string u;
             Bitmap raw = Grab(h, src, method, out u);
-            for (int tries = 0; h != IntPtr.Zero && raw != null && tries < 4 && LooksBlank(raw); tries++)
+            for (int tries = 0; raw != null && tries < 3 && u.StartsWith("print", StringComparison.Ordinal) && LooksBlank(raw); tries++)
             {
                 raw.Dispose();
-                Thread.Sleep(250);
+                Thread.Sleep(Pace(150, 250));
                 raw = Grab(h, src, method, out u);
             }
             used = u;
@@ -719,12 +797,69 @@ namespace CU
             return px;
         }
 
-        // cheap content fingerprint (strided sum): identical screens skip a repeated OCR pass
+        // OCR fuzzy match: every start position in `text` whose window matches `query` with Levenshtein distance <= 1
+        // (one substitution, insertion or deletion; window length may be len-1, len or len+1). Both strings are
+        // already normalized (lowercase, no whitespace/punctuation). Returns a JSON array of start offsets.
+        // Queries shorter than 4 chars are never fuzzy-matched (too many accidental hits).
+        public static string FuzzyHits(string text, string query, int maxHits)
+        {
+            StringBuilder sb = new StringBuilder("[");
+            int n = query.Length, m = text.Length, found = 0;
+            if (n >= 4 && m >= n - 1)
+            {
+                for (int i = 0; i <= m - n + 1; i++)
+                {
+                    bool ok = false;
+                    for (int len = Math.Max(1, n - 1); len <= n + 1 && !ok; len++)
+                    {
+                        if (i + len > m) continue;
+                        if (Lev(text, i, len, query) <= 1) ok = true;
+                    }
+                    if (!ok) continue;
+                    if (found > 0) sb.Append(",");
+                    sb.Append(i);
+                    if (++found >= maxHits) break;
+                }
+            }
+            return sb.Append("]").ToString();
+        }
+
+        static int Lev(string a, int off, int len, string b)
+        {
+            int m = b.Length;
+            int[] prev = new int[m + 1], cur = new int[m + 1];
+            for (int j = 0; j <= m; j++) prev[j] = j;
+            for (int i = 1; i <= len; i++)
+            {
+                cur[0] = i;
+                for (int j = 1; j <= m; j++)
+                {
+                    int cost = (a[off + i - 1] == b[j - 1]) ? 0 : 1;
+                    cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                }
+                int[] t = prev; prev = cur; cur = t;
+            }
+            return prev[m];
+        }
+
+        // cheap content fingerprint: the buffer is cut into fixed-size blocks, every block is sampled with a
+        // fixed stride and the block number is mixed in. A single global stride (the old scheme) could jump
+        // straight over a small repaint, so a stale OCR result looked "cached" and find returned old coords.
+        // ~400k samples regardless of size: same order of cost as before.
         public static long QuickHash(byte[] b)
         {
+            const int Blocks = 4096, Samples = 400000;
             long h = 1469598103934665603L ^ b.Length;
-            int step = Math.Max(1, b.Length / 200000);
-            for (int i = 0; i < b.Length; i += step) h = (h ^ b[i]) * 1099511628211L;
+            if (b.Length == 0) return h;
+            int blockSize = Math.Max(1, b.Length / Blocks);
+            int stride = Math.Max(1, blockSize / Math.Max(1, Samples / Blocks));
+            int blocks = (b.Length + blockSize - 1) / blockSize;
+            for (int blk = 0; blk < blocks; blk++)
+            {
+                int start = blk * blockSize, end = Math.Min(b.Length, start + blockSize);
+                h = (h ^ blk) * 1099511628211L;
+                for (int i = start; i < end; i += stride) h = (h ^ b[i]) * 1099511628211L;
+            }
             return h;
         }
 
@@ -830,7 +965,7 @@ namespace CU
             double ch = 0, chR = 0;
             bool settled = false, any = false;
             if (quietMs <= 0 || quietMs > maxMs) quietMs = maxMs;
-            Thread.Sleep(25);
+            Thread.Sleep(Pace(15, 25));
             int polls = 0;
             while (true)
             {
@@ -850,11 +985,11 @@ namespace CU
                 if (any && stable) { settled = true; break; }
                 if (!any && sw.ElapsedMilliseconds >= quietMs) break;
                 if (sw.ElapsedMilliseconds >= maxMs) break;
-                Thread.Sleep(30);
+                Thread.Sleep(Pace(20, 30));
             }
             if (prev != null) prev.Dispose();
             if (prevR != null) prevR.Dispose();
-            return "\"changed\":" + J.F(ch) + ",\"roi_changed\":" + J.F(chR) + ",\"settled\":" + J.B(settled) +
+            return "\"changed\":" + J.F(ch) + ",\"roi_changed\":" + J.F(chR) + ",\"settled\":" + J.B(settled) + ",\"no_change\":" + J.B(!any) +
                    ",\"settle_ms\":" + sw.ElapsedMilliseconds + ",\"polls\":" + polls;
         }
         public static string Settle(long hwnd, Bitmap before, int maxMs) { return Settle(hwnd, before, null, 0, 0, maxMs, maxMs); }
@@ -867,7 +1002,7 @@ namespace CU
             bool ok = false;
             while (prev != null && sw.ElapsedMilliseconds < maxMs)
             {
-                Thread.Sleep(80);
+                Thread.Sleep(Pace(50, 80));
                 Bitmap cur = Thumb(hwnd);
                 if (cur == null) break;
                 double d = Diff(prev, cur);
@@ -959,7 +1094,7 @@ namespace CU
                 for (int i = 0; i < steps; i++)
                 {
                     N.PostMessage(t, msg, new IntPtr(((dir & 0xFFFF) << 16) | mm), slp);
-                    Thread.Sleep(15);
+                    Thread.Sleep(Pace(8, 15));
                 }
             }
             else if (act == "move") N.PostMessage(t, 0x200, new IntPtr(mm), lp);
@@ -967,32 +1102,35 @@ namespace CU
             else if (act == "up") N.PostMessage(t, up, new IntPtr(mm), lp);
             else if (act == "drag")
             {
-                N.PostMessage(t, 0x200, new IntPtr(mm), lp); Thread.Sleep(10);
-                N.PostMessage(t, down, new IntPtr(mk | mm), lp); Thread.Sleep(40);
+                N.PostMessage(t, 0x200, new IntPtr(mm), lp); Thread.Sleep(Pace(5, 10));
+                N.PostMessage(t, down, new IntPtr(mk | mm), lp); Thread.Sleep(Pace(20, 40));
                 int steps = 12;
                 for (int i = 1; i <= steps; i++)
                 {
                     int x = sx + (sx2 - sx) * i / steps, y = sy + (sy2 - sy) * i / steps;
                     N.PostMessage(t, 0x200, new IntPtr(mk | mm), LP(ToTarget(t, x, y, true)));
-                    Thread.Sleep(12);
+                    Thread.Sleep(Pace(6, 12));
                 }
                 N.PostMessage(t, up, new IntPtr(mm), LP(ToTarget(t, sx2, sy2, true)));
             }
             else
             {
-                N.PostMessage(t, 0x200, new IntPtr(mm), lp); Thread.Sleep(8);
-                N.PostMessage(t, down, new IntPtr(mk | mm), lp); Thread.Sleep(20);
+                N.PostMessage(t, 0x200, new IntPtr(mm), lp); Thread.Sleep(Pace(3, 8));
+                N.PostMessage(t, down, new IntPtr(mk | mm), lp); Thread.Sleep(Pace(10, 20));
                 N.PostMessage(t, up, new IntPtr(mm), lp);
                 if (act == "double")
                 {
-                    Thread.Sleep(20);
-                    N.PostMessage(t, dbl, new IntPtr(mk | mm), lp); Thread.Sleep(20);
+                    Thread.Sleep(Pace(12, 20));
+                    N.PostMessage(t, dbl, new IntPtr(mk | mm), lp); Thread.Sleep(Pace(12, 20));
                     N.PostMessage(t, up, new IntPtr(mm), lp);
                 }
             }
             N.POINT after; N.GetCursorPos(out after);
+            // a background click on the non-client area (frame/border) posts a message nothing handles; say so
+            N.RECT cr; bool inClient = false;
+            if (N.GetClientRect(t, out cr)) inClient = c.X >= 0 && c.Y >= 0 && c.X < cr.R - cr.L && c.Y < cr.B - cr.T;
             return "{\"ok\":true,\"mode\":\"bg\",\"act\":" + J.Q(act) + ",\"screen\":[" + sx + "," + sy + "],\"target\":" + J.Q(J.Hex(t)) +
-                   ",\"cls\":" + J.Q(Cls(t)) + ",\"client\":[" + c.X + "," + c.Y + "],\"cursor_moved\":" +
+                   ",\"cls\":" + J.Q(Cls(t)) + ",\"client\":[" + c.X + "," + c.Y + "],\"in_client\":" + J.B(inClient) + ",\"cursor_moved\":" +
                    J.B(before.X != after.X || before.Y != after.Y) + "}";
         }
 
@@ -1021,10 +1159,10 @@ namespace CU
             N.BringWindowToTop(h);
             N.SetForegroundWindow(h);
             if (att) N.AttachThreadInput(me, ft, false);
-            for (int i = 0; i < 25; i++) { if (SameApp(N.GetForegroundWindow(), h)) return true; Thread.Sleep(12); }
+            for (int i = 0; i < 25; i++) { if (SameApp(N.GetForegroundWindow(), h)) return true; Thread.Sleep(Pace(8, 12)); }
             SendKey(0x12, false); SendKey(0x12, true);   // ALT tap lifts the foreground lock
             N.SetForegroundWindow(h);
-            for (int i = 0; i < 25; i++) { if (SameApp(N.GetForegroundWindow(), h)) return true; Thread.Sleep(12); }
+            for (int i = 0; i < 25; i++) { if (SameApp(N.GetForegroundWindow(), h)) return true; Thread.Sleep(Pace(8, 12)); }
             return false;
         }
         public static string Activate(long hwnd)
@@ -1054,27 +1192,27 @@ namespace CU
             if ((mods & 1) != 0) SendKey(0x11, false);
             if ((mods & 2) != 0) SendKey(0x10, false);
             N.SetCursorPos(sx, sy);
-            Thread.Sleep(15);
+            Thread.Sleep(Pace(10, 15));
             if (act == "scroll" || act == "hscroll") SendMouse(act == "scroll" ? 0x0800u : 0x1000u, wheel * 120);
             else if (act == "move") { }
             else if (act == "down") SendMouse(fd, 0);
             else if (act == "up") SendMouse(fu, 0);
             else if (act == "drag")
             {
-                SendMouse(fd, 0); Thread.Sleep(40);
+                SendMouse(fd, 0); Thread.Sleep(Pace(20, 40));
                 int steps = 16;
-                for (int i = 1; i <= steps; i++) { N.SetCursorPos(sx + (sx2 - sx) * i / steps, sy + (sy2 - sy) * i / steps); Thread.Sleep(12); }
-                Thread.Sleep(30);
+                for (int i = 1; i <= steps; i++) { N.SetCursorPos(sx + (sx2 - sx) * i / steps, sy + (sy2 - sy) * i / steps); Thread.Sleep(Pace(6, 12)); }
+                Thread.Sleep(Pace(15, 30));
                 SendMouse(fu, 0);
             }
             else
             {
-                SendMouse(fd, 0); Thread.Sleep(15); SendMouse(fu, 0);
-                if (act == "double") { Thread.Sleep(40); SendMouse(fd, 0); Thread.Sleep(15); SendMouse(fu, 0); }
+                SendMouse(fd, 0); Thread.Sleep(Pace(8, 15)); SendMouse(fu, 0);
+                if (act == "double") { Thread.Sleep(Pace(20, 40)); SendMouse(fd, 0); Thread.Sleep(Pace(8, 15)); SendMouse(fu, 0); }
             }
             if ((mods & 2) != 0) SendKey(0x10, true);
             if ((mods & 1) != 0) SendKey(0x11, true);
-            Thread.Sleep(20);
+            Thread.Sleep(Pace(10, 20));
             if (restoreCursor && act != "move") N.SetCursorPos(before.X, before.Y);
             return "{\"ok\":true,\"mode\":\"fg\",\"act\":" + J.Q(act) + ",\"screen\":[" + sx + "," + sy + "],\"cursor_restored\":" + J.B(restoreCursor) + "}";
         }
@@ -1143,6 +1281,42 @@ namespace CU
             if (N.GetGUIThreadInfo(tid, ref gi) && gi.hwndFocus != IntPtr.Zero) return gi.hwndFocus;
             return top;
         }
+
+        // after a focusing click: wait until the window's focus really moved to the clicked child (or timeout).
+        // posted mouse messages can still sit in the target's queue while a sent message (WM_PASTE/WM_CHAR) is
+        // already being processed - a fixed sleep is a guess, waiting for the focus is deterministic.
+        public static long WaitFocus(long hwnd, long want, int timeoutMs)
+        {
+            A();
+            IntPtr top = new IntPtr(hwnd);
+            if (top == IntPtr.Zero || !N.IsWindow(top)) return 0;
+            Stopwatch sw = Stopwatch.StartNew();
+            while (true)
+            {
+                IntPtr f = FocusOf(top);
+                if (want == 0 || f.ToInt64() == want) return f.ToInt64();
+                if (sw.ElapsedMilliseconds >= timeoutMs) return f.ToInt64();
+                Thread.Sleep(Pace(5, 15));
+            }
+        }
+        public static long FocusedChild(long hwnd) { A(); IntPtr h = new IntPtr(hwnd); return h == IntPtr.Zero ? 0 : FocusOf(h).ToInt64(); }
+
+        // exact text of a control via WM_GETTEXT: synchronous and not subject to UIA cache/staleness, which is
+        // what verification wants for classic edit controls (the UIA value of a WinForms box can lag the paste)
+        public static string TextOf(long hwnd)
+        {
+            A();
+            IntPtr h = new IntPtr(hwnd);
+            if (h == IntPtr.Zero || !N.IsWindow(h)) return null;
+            StringBuilder sb = new StringBuilder(8192);
+            IntPtr res;
+            try
+            {
+                if (N.SendMessageTimeoutSB(h, 0x000D, new IntPtr(sb.Capacity), sb, 2, 1500, out res) == IntPtr.Zero) return null;
+            }
+            catch { return null; }
+            return sb.ToString();
+        }
         public static bool IsClassicEdit(string cls)
         {
             return cls.Equals("Edit", StringComparison.OrdinalIgnoreCase) || cls.IndexOf(".EDIT.", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -1188,7 +1362,7 @@ namespace CU
             {
                 foreach (ushort k in ks) N.PostMessage(t, kd, new IntPtr(k), KeyLP(k, false, alt));
                 for (int i = ks.Length - 1; i >= 0; i--) N.PostMessage(t, ku, new IntPtr(ks[i]), KeyLP(ks[i], true, alt));
-                Thread.Sleep(5);
+                Thread.Sleep(Pace(2, 5));
             }
             string warn = (ctrl || alt || win || shift) ? ",\"warn\":\"background modifier keys are simulated; apps that read the real key state may ignore them - verify, or use -Fg\"" : "";
             return "{\"ok\":true,\"mode\":\"bg\",\"keys\":" + J.Q(combo) + ",\"how\":" + J.Q(how) + ",\"target\":" + J.Q(J.Hex(t)) + ",\"cls\":" + J.Q(cls) + warn + "}";
@@ -1269,7 +1443,7 @@ namespace CU
                 int n = Math.Min(200, l.Count - i);
                 N.INPUT[] chunk = l.GetRange(i, n).ToArray();
                 N.SendInput((uint)n, chunk, size);
-                Thread.Sleep(10);
+                Thread.Sleep(Pace(5, 10));
             }
             return "{\"ok\":true,\"mode\":\"fg\",\"method\":\"unicode\",\"chars\":" + text.Length + "}";
         }

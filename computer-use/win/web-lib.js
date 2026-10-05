@@ -2,7 +2,7 @@
    Installs window.__cu once per document (versioned). Plain ES5 so it also runs in old embedded pages.
    It is embedded as a JSON string by web.cs, so any quoting style is fine. */
 (function () {
-  var VERSION = 18;
+  var VERSION = 19;
   if (window.__cu && window.__cu.v === VERSION) return;
   var cu = { v: VERSION, els: null, last: null, lastInput: null };
   var norm = function (t) { return String(t == null ? '' : t).replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim(); };
@@ -185,8 +185,26 @@
     }
     var f = hit || pts[0];
     var out = { x: top.x + top.w * f[0], y: top.y + top.h * f[1], hit: !!hit };
+    cu.lastRect = top;
     if (!hit && first) { var fd = cu.describe(first); out.cover = fd.tag + (fd.id ? '#' + fd.id : '') + (fd.cls ? '.' + fd.cls.split(' ')[0] : ''); }
     return out;
+  };
+  // post-dispatch check for a real mouse click: is the element still the one that a click at the point hits?
+  // present=false -> element gone (navigation/removal: the click almost certainly worked)
+  // moved -> the layout shifted since locate (a single retry is safe); offscreen -> do NOT auto-retry
+  cu.check = function (el) {
+    if (!el || el.nodeType !== 1) return { present: false, hit: false };
+    var lr = el.getBoundingClientRect();
+    if (lr.width === 0 && lr.height === 0) return { present: false, hit: false };
+    var lx = lr.left + lr.width / 2, ly = lr.top + lr.height / 2;
+    var off = lr.bottom <= 0 || lr.top >= innerHeight || lr.right <= 0 || lr.left >= innerWidth;
+    var h = null; try { h = el.ownerDocument.elementFromPoint(lx, ly); } catch (e) { h = null; }
+    var same = !!(h && (h === el || el.contains(h) || h.contains(el) || (h.shadowRoot && h.shadowRoot.contains(el))));
+    var tr = cu.rect(el), lr0 = cu.lastRect;
+    var moved = !lr0 || Math.abs(tr.x - lr0.x) > 2 || Math.abs(tr.y - lr0.y) > 2 || Math.abs(tr.w - lr0.w) > 2 || Math.abs(tr.h - lr0.h) > 2;
+    var res = { present: true, hit: same, moved: moved, offscreen: off };
+    if (!same && h) { var fd = cu.describe(h); res.cover = fd.tag + (fd.id ? '#' + fd.id : '') + (fd.cls ? '.' + fd.cls.split(' ')[0] : ''); }
+    return res;
   };
   // list interactive elements (numbered; ids stay valid while the page does not change). vp=true keeps only what intersects the viewport
   cu.collect = function (scopeSel, all, max, vp) {

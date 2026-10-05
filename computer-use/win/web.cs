@@ -313,6 +313,14 @@ namespace CU
             return e;
         }
 
+        // Runtime.evaluate must never be re-sent after a timeout either: the snippet may already have run
+        // (a DOM click, a form submit, a scroll) and a second execution would double the side effect.
+        // Session/target re-attach and WebSocket reconnect still retry; only the timeout resend is off.
+        static string EvalCall(string b, string paramsJson, int timeoutMs, out string resultJson)
+        {
+            return CoreCallEx(b, true, "Runtime.evaluate", paramsJson, timeoutMs, false, out resultJson);
+        }
+
         static string CoreCallEx(string b, bool useSession, string method, string paramsJson, int timeoutMs, bool retryOnTimeout, out string resultJson)
         {
             resultJson = null;
@@ -430,7 +438,7 @@ namespace CU
             string p = "{\"expression\":" + J.Q(expression) + ",\"returnByValue\":true,\"awaitPromise\":true,\"timeout\":" +
                        Math.Min(Math.Max(timeoutMs, 500), 30000).ToString(CultureInfo.InvariantCulture) + "}";
             string res;
-            string e = CoreCall(b, true, "Runtime.evaluate", p, Math.Max(timeoutMs, 1000) + 1000, out res);
+            string e = EvalCall(b, p, Math.Max(timeoutMs, 1000) + 1000, out res);
             if (e != null) { errJson = e; return null; }
             Dictionary<string, object> d = ParseD(res);
             if (d == null) { errJson = J.Err("ERR_CDP", "bad evaluate result"); return null; }
@@ -515,7 +523,7 @@ namespace CU
                            ",\"running\":true,\"started\":true,\"ms\":" + sw.ElapsedMilliseconds + "}";
                 }
                 if (p.HasExited) return J.Err("ERR_START", "browser exited early (code " + p.ExitCode + ")");
-                Thread.Sleep(150);
+                Thread.Sleep(sw.ElapsedMilliseconds < 2000 ? 60 : 150);
             }
             return J.Err("ERR_TIMEOUT", "debug port " + port + " did not open within 12s");
         }
@@ -654,7 +662,7 @@ namespace CU
                     if (marked && !fresh && sw.ElapsedMilliseconds > 2500) fresh = true;                // unload never happened: do not hang
                     if (fresh && r == "complete")
                     {
-                        Thread.Sleep(30);    // one paint
+                        Thread.Sleep(25);    // one paint (60 Hz frame = 16 ms)
                         readyState = "complete";
                         return null;
                     }
@@ -668,7 +676,7 @@ namespace CU
                 }
                 if (sw.ElapsedMilliseconds >= timeoutMs)
                     return J.Err("ERR_TIMEOUT", "page not ready within " + timeoutMs + "ms");
-                Thread.Sleep(30);
+                Thread.Sleep(15);
             }
         }
 
@@ -1053,6 +1061,7 @@ namespace CU
                     string me = DispatchMouse(b, DN(d, "x"), DN(d, "y"), button, dbl);
                     if (me != null) return me;
                     d["method"] = dbl ? "double" : "mouse";
+                    VerifyClick(b, sel, text, index, exact, id, dbl, button, method, d);
                 }
                 else
                 {
@@ -1095,15 +1104,15 @@ namespace CU
             if (before == null) return;
             Stopwatch sw = Stopwatch.StartNew();
             // no hint: one immediate check (a window.open in the click handler has already created its target by the time
-            // the mouse events are acked); target=_blank: the navigation may take a moment, poll up to 1.5 s
-            int budget = hinted ? 1500 : 0;
+            // the mouse events are acked); target=_blank: the navigation may take a moment, poll up to 700 ms
+            int budget = hinted ? 700 : 0;
             string fresh = null;
             while (true)
             {
                 List<string> now = PageIds(b);
                 foreach (string id in now) if (!before.Contains(id)) { fresh = id; break; }
                 if (fresh != null || sw.ElapsedMilliseconds >= budget) break;
-                Thread.Sleep(80);
+                Thread.Sleep(50);
             }
             if (fresh == null) return;
             string ar;
@@ -1123,6 +1132,37 @@ namespace CU
             nt["id"] = fresh; nt["url"] = nd == null ? "" : SN(nd, "h"); nt["title"] = nd == null ? "" : Trunc(SN(nd, "t"), 120); nt["ready"] = rs ?? "";
             d["newTab"] = nt;
             d["followed"] = true;
+        }
+
+        // after a dispatched mouse click: does the point still hit the element? (cu.check in web-lib.js)
+        static void VerifyClick(string b, string sel, string text, int index, bool exact, int id, bool dbl, string button, string method,
+                                Dictionary<string, object> d)
+        {
+            Dictionary<string, object> d3;
+            if (LibEval(b, "({ok:true,v:__cu.check(__cu.last)})", 2500, out d3) != null) return;
+            Dictionary<string, object> v3 = d3.ContainsKey("v") ? d3["v"] as Dictionary<string, object> : null;
+            if (v3 == null) return;
+            bool hit = BN(v3.ContainsKey("hit") ? v3["hit"] : null);
+            bool present = BN(v3.ContainsKey("present") ? v3["present"] : null);
+            bool moved = BN(v3.ContainsKey("moved") ? v3["moved"] : null);
+            bool off = BN(v3.ContainsKey("offscreen") ? v3["offscreen"] : null);
+            d["verified"] = hit;
+            if (!hit && v3.ContainsKey("cover")) d["cover"] = v3["cover"];
+            // a layout shift moved the element after we located it: one single retry is safe. A merely covered
+            // point is NOT retried - the second click would land on whatever covers it (often a just-opened modal).
+            if (hit || !present || !moved || off || method != "auto" || dbl || button != "left") return;
+            Dictionary<string, object> d4;
+            if (LibEval(b, LocateExpr(LocQ(sel, text, index, exact, id, false), "", true), 6000, out d4) != null) return;
+            if (!BN(d4.ContainsKey("hit") ? d4["hit"] : null) || !Frames(d4)) return;
+            string me = DispatchMouse(b, DN(d4, "x"), DN(d4, "y"), button, false);
+            if (me != null) return;
+            d["retried"] = true;
+            Dictionary<string, object> d5;
+            if (LibEval(b, "({ok:true,v:__cu.check(__cu.last)})", 2500, out d5) == null)
+            {
+                Dictionary<string, object> v5 = d5.ContainsKey("v") ? d5["v"] as Dictionary<string, object> : null;
+                if (v5 != null) d["verified"] = BN(v5.ContainsKey("hit") ? v5["hit"] : null);
+            }
         }
 
         public static string ClickXY(string b, double x, double y, string button)
@@ -1497,19 +1537,20 @@ namespace CU
         }
 
         // ---------------------------------------------------------------- read / eval / info / els
-        static string TextExpr(string sel)
+        static string TextExpr(string sel, int max)
         {
+            int cap = max > 0 ? max : 20000;   // token budget: 100k chars of page text is ~30k tokens in one reply
             return "(()=>{" +
                 "try{" +
                 "var el=" + (string.IsNullOrEmpty(sel) ? "document.body" : "document.querySelector(" + J.Q(sel) + ")") + ";" +
                 "if(!el)return{ok:false,err:'ERR_NOT_FOUND',msg:" + (string.IsNullOrEmpty(sel) ? "'document has no body yet (still loading?)'" : "'selector not found: '+" + J.Q(sel)) + "};" +
-                "var t=el.innerText||el.textContent||'';var tr=false;" +
-                "if(t.length>100000){t=t.slice(0,100000);tr=true;}" +
-                "return{ok:true,url:String(location.href),title:String(document.title),text:t,len:t.length,truncated:tr};" +
+                "var t=el.innerText||el.textContent||'';var tr=false;var full=t.length;" +
+                "if(t.length>" + cap.ToString(CultureInfo.InvariantCulture) + "){t=t.slice(0," + cap.ToString(CultureInfo.InvariantCulture) + ");tr=true;}" +
+                "return{ok:true,url:String(location.href),title:String(document.title),text:t,len:full,chars:t.length,truncated:tr};" +
                 "}catch(e){return{ok:false,err:'ERR_SEL',msg:String(e.message)}}})()";
         }
 
-        public static string Text(string b, string sel)
+        public static string Text(string b, string sel, int max)
         {
             b = Norm(b);
             if (b == "") return J.Err("ERR_ARGS", "-Browser must be edge or chrome");
@@ -1519,7 +1560,7 @@ namespace CU
             // right after a navigation the new document may not have a <body> yet: give it up to a second
             while (true)
             {
-                er = EvalObj(b, TextExpr(sel), 8000, out d, out unused);
+                er = EvalObj(b, TextExpr(sel, max), 8000, out d, out unused);
                 oe = er == null ? ObjErr(d) : null;
                 if (er == null && oe == null) break;
                 if (sw.ElapsedMilliseconds > 1000) break;
@@ -1639,7 +1680,7 @@ namespace CU
                 if (ej != null && !ej.Contains("ERR_CDP") && !ej.Contains("ERR_WS") && !ej.Contains("ERR_TIMEOUT") && !ej.Contains("ERR_JS"))
                     return ej;
                 if (++transient > 200) return ej ?? J.Err("ERR_TIMEOUT", "wait gave up");
-                Thread.Sleep(50);
+                Thread.Sleep(35);
             }
         }
 

@@ -32,22 +32,39 @@ namespace CU
             ControlType.SplitButton, ControlType.DataItem, ControlType.Slider, ControlType.Spinner, ControlType.Document };
 
         public static string LastStatus = "";
-        static volatile bool busy = false;   // a timed-out walk may still be running on its thread
+        static int activeWalks = 0;          // a timed-out walk may still be running on its thread
+        static long lastWalkStart = 0;
+        const int ZombieMs = 30000, MaxWalks = 3;
         public static long LastMs = 0;
 
         public static List<El> Collect(long hwnd, int timeoutMs, bool text, int max)
         {
-            if (busy) { LastStatus = "busy (previous UIA walk still running)"; LastMs = 0; return new List<El>(); }
+            long now = Environment.TickCount;
+            if (activeWalks > 0)
+            {
+                // a hung provider used to leave the old `busy` flag set forever, killing every later UIA call;
+                // now a walk older than ZombieMs is treated as a zombie and a fresh walk is allowed through
+                bool stale = unchecked(now - lastWalkStart) > ZombieMs;
+                if (!stale || activeWalks >= MaxWalks)
+                {
+                    LastStatus = stale
+                        ? "busy-zombie (UIA walks have not returned for >" + (ZombieMs / 1000) + "s; this app's UIA provider is hung)"
+                        : "busy (previous UIA walk still running)";
+                    LastMs = 0;
+                    return new List<El>();
+                }
+            }
             List<El> res = null;
             string err = null;
-            busy = true;
+            Interlocked.Increment(ref activeWalks);
+            lastWalkStart = now;
             IntPtr h = new IntPtr(hwnd);
             System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
             Thread th = new Thread(delegate ()
             {
                 try { res = Walk(h, text, max); }
                 catch (Exception e) { err = e.GetType().Name + ": " + e.Message; }
-                finally { busy = false; }
+                finally { Interlocked.Decrement(ref activeWalks); }
             });
             th.IsBackground = true;
             th.SetApartmentState(ApartmentState.MTA);
@@ -285,6 +302,79 @@ namespace CU
                 return "OK";
             }
             catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        // ---------------------------------------------------------------- direct control action
+        static readonly Dictionary<string, ControlType> Types = new Dictionary<string, ControlType>(StringComparer.OrdinalIgnoreCase)
+        {
+            {"Button", ControlType.Button}, {"Edit", ControlType.Edit}, {"ListItem", ControlType.ListItem},
+            {"MenuItem", ControlType.MenuItem}, {"TabItem", ControlType.TabItem}, {"CheckBox", ControlType.CheckBox},
+            {"RadioButton", ControlType.RadioButton}, {"Hyperlink", ControlType.Hyperlink}, {"ComboBox", ControlType.ComboBox},
+            {"TreeItem", ControlType.TreeItem}, {"SplitButton", ControlType.SplitButton}, {"DataItem", ControlType.DataItem},
+            {"Slider", ControlType.Slider}, {"Spinner", ControlType.Spinner}, {"Document", ControlType.Document}
+        };
+
+        // Re-find the live element (control type + exact rect first, then type + name) and trigger it through its
+        // UIA pattern: menus, buttons, check boxes and tabs then work without coordinates and without background
+        // messages, and a disabled control is reported instead of clicked blindly.
+        // returns the pattern used ("invoke"/"toggle"/"select"/"expand") or null; status says why.
+        public static string Act(long hwnd, string type, string name, int l, int t, int r, int b, int timeoutMs, out string status)
+        {
+            string res = null, st = "none";
+            Thread th = new Thread(delegate ()
+            {
+                try
+                {
+                    Core.A();
+                    IntPtr h = new IntPtr(hwnd);
+                    if (h == IntPtr.Zero || !N.IsWindow(h)) { st = "window-gone"; return; }
+                    AutomationElement root = AutomationElement.FromHandle(h);
+                    if (root == null) { st = "no-root"; return; }
+                    AutomationElement hit = null;
+                    ControlType ct;
+                    if (type != null && Types.TryGetValue(type, out ct))
+                    {
+                        AutomationElementCollection col = root.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ct));
+                        foreach (AutomationElement e in col)      // pass 1: the very same rectangle as the element list
+                        {
+                            System.Windows.Rect rc;
+                            try { rc = e.Current.BoundingRectangle; } catch { continue; }
+                            if (rc.IsEmpty) continue;
+                            if (Math.Abs(rc.Left - l) <= 3 && Math.Abs(rc.Top - t) <= 3 &&
+                                Math.Abs(rc.Right - r) <= 3 && Math.Abs(rc.Bottom - b) <= 3) { hit = e; break; }
+                        }
+                        if (hit == null && !string.IsNullOrEmpty(name))   // pass 2: same control type + same name
+                        {
+                            string want = Norm(name);
+                            foreach (AutomationElement e in col)
+                            {
+                                string en = "";
+                                try { en = e.Current.Name ?? ""; } catch { }
+                                if (en.Length > 0 && Norm(en) == want) { hit = e; break; }
+                            }
+                        }
+                    }
+                    else if (!string.IsNullOrEmpty(name))                  // unknown type: exact name match only
+                    {
+                        hit = root.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.NameProperty, name));
+                    }
+                    if (hit == null) { st = "not-found"; return; }
+                    try { if (!hit.Current.IsEnabled) { st = "disabled"; return; } } catch { }
+                    object p;
+                    if (hit.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); res = "invoke"; }
+                    else if (hit.TryGetCurrentPattern(TogglePattern.Pattern, out p)) { ((TogglePattern)p).Toggle(); res = "toggle"; }
+                    else if (hit.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p)) { ((SelectionItemPattern)p).Select(); res = "select"; }
+                    else if (hit.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out p)) { ((ExpandCollapsePattern)p).Expand(); res = "expand"; }
+                    st = res != null ? "ok" : "no-pattern";
+                }
+                catch (Exception e) { st = "error: " + e.GetType().Name + " " + e.Message; }
+            });
+            th.IsBackground = true;
+            th.SetApartmentState(ApartmentState.MTA);
+            th.Start();
+            if (!th.Join(timeoutMs)) st = "timeout";
+            status = st;
+            return res;
         }
 
         // ---------------------------------------------------------------- focused element text (verification)

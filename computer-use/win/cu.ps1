@@ -24,16 +24,20 @@ param(
   [int]$Ms = 0, [switch]$Stable, [int]$Timeout = 8000,
   [string]$Steps, [string]$StepsFile,
   [int]$Id = 0, [string]$Name, [string]$NameB64, [switch]$Marks, [switch]$Uia, [switch]$Text2, [int]$UiaTimeout = 1500,
-  [switch]$NoSnapTo, [switch]$Verify, [int]$Quiet = 400, [string]$Pipe, [int]$Idle = 0,
+  [switch]$NoSnapTo, [switch]$Verify, [int]$Quiet = 250, [string]$Pipe, [int]$Idle = 0,
   [string]$Sel, [string]$Js, [string]$Url, [string]$Browser = "edge",
-  [switch]$NewTab, [switch]$Full, [switch]$Ready, [switch]$Append, [switch]$Exact
+  [switch]$NewTab, [switch]$Full, [switch]$Ready, [switch]$Append, [switch]$Exact,
+  [switch]$Strict, [string]$Lang, [switch]$UiaForce, [switch]$FgAuto, [switch]$BgForce, [int]$Max = 0
 )
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $script:here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:state = if ($env:CU_STATE) { $env:CU_STATE } else { Join-Path (Split-Path -Parent $script:here) "state" }
 $script:lastFrame = Join-Path $script:state "last.frame.json"
-$script:cfg = @{ MaxSide = 1568; MaxPixels = 1150000; Cap = 1.0 }   # defaults sized for typical multimodal input limits
+$script:cfg = @{ MaxSide = 1568; MaxPixels = 1150000; Cap = 1.0; Quiet = 250 }   # defaults sized for typical multimodal input limits
+if ($env:CU_SETTLE_QUIET) { try { $script:cfg.Quiet = [int]$env:CU_SETTLE_QUIET } catch { } }
+$script:slowInput = ($env:CU_SLOW -eq "1")            # restore the pre-6.1 fixed waits
+$script:fgAutoEnv = ($env:CU_FG_AUTO -eq "1")         # auto-foreground for Chromium/Qt windows (opt-in)
 
 # ------------------------------------------------------------------ load core (compiled once, cached by source hash)
 function Import-Core {
@@ -71,6 +75,41 @@ function P($a, $k, $d) { if ($a.ContainsKey($k) -and $null -ne $a[$k] -and "$($a
 function Has($a, $k) { return $a.ContainsKey($k) -and $null -ne $a[$k] -and "$($a[$k])" -ne "" }
 function IsErr($j) { return $j.StartsWith('{"ok":false') }
 function Fail($code, $msg) { throw [System.Exception]::new("CUERR|" + $code + "|" + $msg) }
+
+# pacing: CU_SLOW=1 restores the pre-6.1 (slower) fixed waits between injected events
+function Sleep-Fast([int]$fast, [int]$slow) { Start-Sleep -Milliseconds $(if ($script:slowInput) { $slow } else { $fast }) }
+# settle quiet window: default 250 ms, CU_SETTLE_QUIET overrides the default, per-call -Quiet wins
+function Get-Quiet($a) { if (Has $a 'Quiet') { return [int]$a.Quiet }; return [int]$script:cfg.Quiet }
+
+# UIA-unavailable memo: apps whose UIA walk times out every single time (Electron/QQ, some Chromium shells)
+# are remembered per process for 10 minutes - -Name / snap -Marks / els then skip UIA instead of burning 1.5 s
+function Test-UiaDead([int64]$hw, $a) {
+  if ([bool](P $a 'UiaForce' $false)) { return $false }
+  if (-not $script:uiaDead) { $script:uiaDead = @{} }
+  $pid0 = [CU.Core]::PidOf($hw)
+  if ($pid0 -le 0) { return $false }
+  $t = $script:uiaDead[$pid0]
+  return ($null -ne $t -and ([Environment]::TickCount - $t) -lt 600000)
+}
+function Mark-UiaDead([int64]$hw, [string]$status) {
+  if ($status -ne 'timeout' -and $status -notlike 'busy-zombie*') { return }
+  if (-not $script:uiaDead) { $script:uiaDead = @{} }
+  $pid0 = [CU.Core]::PidOf($hw)
+  if ($pid0 -gt 0) { $script:uiaDead[$pid0] = [Environment]::TickCount }
+}
+# Chromium/Electron/Qt windows: measured to ignore background messages (see REFERENCE.md)
+function Test-Chromium([int64]$hw) {
+  $cls = ""
+  try { $cls = [CU.Core]::ClsOf($hw) } catch { return $false }
+  return ($cls -like "Chrome_WidgetWin*" -or $cls -like "Qt*QWindow*")
+}
+# CU_FG_AUTO=1 / -FgAuto routes clicks and typing on those windows to the foreground path;
+# -BgForce opts a single call back out. Default off: iron rule 4 (no cursor move, no focus steal) stays the contract.
+function Test-FgAuto($a, [int64]$hw) {
+  if ([bool](P $a 'BgForce' $false)) { return $false }
+  if (-not ([bool](P $a 'FgAuto' $false)) -and -not $script:fgAutoEnv) { return $false }
+  return (Test-Chromium $hw)
+}
 
 function Get-FramePath($a) {
   $f = P $a 'Frame' $script:lastFrame
@@ -130,7 +169,15 @@ function Get-Target($a, [bool]$needPoint, [bool]$needPoint2) {
   } elseif ($needPoint -and ((Has $a 'Find') -or (Has $a 'FindB64'))) {
     $hit = Find-Text $a
     $a['X'] = $hit.cx; $a['Y'] = $hit.cy; $screen = ($script:ocrSpace -eq 'screen')
-    $ctx.note = ',"found":' + (Q $hit.text)
+    $ctx.note = ',"found":' + (Q $hit.text) + ',"match":' + (Q $hit.match) + ',"hit_box":' + (HitBoxJson $hit)
+    $alts = @(); $n = 0
+    foreach ($h2 in @($hit.all)) {
+      $n++
+      if ($n -eq [int](P $a 'Index' 1)) { continue }
+      $alts += (HitJson $h2)
+      if ($alts.Count -ge 4) { break }
+    }
+    if ($alts.Count) { $ctx.note += ',"alts":[' + ($alts -join ',') + ']' }
   }
   if (-not $screen -and ($needPoint -or $needPoint2 -or $ctx.hw -eq 0)) {
     $fr = Get-Frame $a
@@ -194,8 +241,15 @@ function Find-ByName($a) {
   $fr = Get-Frame $a
   if ($hw -eq 0 -and $null -ne $fr) { $hw = $fr.hwnd }
   if ($hw -eq 0) { Fail "ERR_NO_WINDOW" "-Name needs -Title/-Proc/-Hwnd or a frame" }
-  $l = [CU.Uia]::Collect($hw, [int](P $a 'UiaTimeout' 1500), $true, 1500)
-  $st = [CU.Uia]::LastStatus
+  $l = $null; $st = $null
+  if (Test-UiaDead $hw $a) {
+    $l = New-Object 'System.Collections.Generic.List[CU.El]'
+    $st = "skipped (this process timed out on UIA before; -UiaForce retries)"
+  } else {
+    $l = [CU.Uia]::Collect($hw, [int](P $a 'UiaTimeout' 1500), $true, 1500)
+    $st = [CU.Uia]::LastStatus
+    Mark-UiaDead $hw $st
+  }
   $hits = [CU.Uia]::ByName($l, $q)
   $i = [int](P $a 'Index' 1)
   if ($hits.Count -ge $i) {
@@ -206,7 +260,7 @@ function Find-ByName($a) {
   $b['Find'] = $q; $b.Remove('FindB64')
   try { $hit = Find-Text $b }
   catch { Fail "ERR_TEXT_NOT_FOUND" ("'" + $q + "' not found: UIA " + $st + " (" + $l.Count + " elements), OCR no match") }
-  return @{ x = $hit.cx; y = $hit.cy; screen = ($script:ocrSpace -eq 'screen'); el = $null; note = ',"via":"ocr","uia":' + (Q ($st + "/" + $l.Count)) + ',"found":' + (Q $hit.text) }
+  return @{ x = $hit.cx; y = $hit.cy; screen = ($script:ocrSpace -eq 'screen'); el = $null; note = ',"via":"ocr","uia":' + (Q ($st + "/" + $l.Count)) + ',"match":' + (Q $hit.match) + ',"found":' + (Q $hit.text) }
 }
 # frame-coordinate click: if an element list exists for this frame, keep points inside an element,
 # pull near-misses (within ~6 image px) onto the nearest control's centre
@@ -224,8 +278,15 @@ function Invoke-SnapTo($a, $ctx) {
 function Invoke-Marks($a, $snapJson) {
   $fr = [CU.Frame]::Parse($snapJson)
   $fp = [IO.Path]::ChangeExtension($fr.img, ".frame.json")
-  $l = [CU.Uia]::Collect([int64]$fr.hwnd, [int](P $a 'UiaTimeout' 1500), [bool](P $a 'Text2' $false), 400)
-  $st = [CU.Uia]::LastStatus; $ms = [CU.Uia]::LastMs
+  $l = $null; $st = $null; $ms = 0
+  if (Test-UiaDead ([int64]$fr.hwnd) $a) {
+    $l = New-Object 'System.Collections.Generic.List[CU.El]'
+    $st = "skipped (this process timed out on UIA before; -UiaForce retries)"
+  } else {
+    $l = [CU.Uia]::Collect([int64]$fr.hwnd, [int](P $a 'UiaTimeout' 1500), [bool](P $a 'Text2' $false), 400)
+    $st = [CU.Uia]::LastStatus; $ms = [CU.Uia]::LastMs
+    Mark-UiaDead ([int64]$fr.hwnd) $st
+  }
   [CU.Uia]::SaveCache((UiaCachePath $fp), $fr, $l)
   [CU.Uia]::SaveCache((UiaCachePath $script:lastFrame), $fr, $l)
   $frag = '"uia":{"status":' + (Q $st) + ',"ms":' + $ms + ',"count":' + $l.Count + '}'
@@ -258,8 +319,8 @@ function Invoke-Snap($a, [int64]$hw, [bool]$updateLast) {
     }
     $hasR = $true
   }
-  $ms = [int](P $a 'MaxSide' -1); if ($ms -lt 0) { $ms = $script:cfg.MaxSide }
-  $mp = [int](P $a 'MaxPixels' -1); if ($mp -lt 0) { $mp = $script:cfg.MaxPixels }
+  $ms = [int](P $a 'MaxSide' -1); if ($ms -le 0) { $ms = $script:cfg.MaxSide }
+  $mp = [int](P $a 'MaxPixels' -1); if ($mp -le 0) { $mp = $script:cfg.MaxPixels }
   $lf = if ($updateLast) { $script:lastFrame } else { "" }
   $j = [CU.Core]::Snap($hw, $hasR, $rl, $rt, $rr, $rb, $ms, $mp, [double](P $a 'Scale' 0), $script:cfg.Cap,
                         [int](P $a 'Grid' 0), $out, [int](P $a 'Quality' 85), (P $a 'Method' "auto"), [bool](P $a 'Restore' $false), $lf)
@@ -298,16 +359,40 @@ function Initialize-Ocr {
   $null = [Windows.Graphics.Imaging.SoftwareBitmap,Windows.Graphics,ContentType=WindowsRuntime]
   $null = [Windows.Graphics.Imaging.BitmapPixelFormat,Windows.Graphics,ContentType=WindowsRuntime]
   $null = [Windows.Graphics.Imaging.BitmapAlphaMode,Windows.Graphics,ContentType=WindowsRuntime]
+  $null = [Windows.Globalization.Language,Windows.Globalization,ContentType=WindowsRuntime]
   $script:asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
-  $script:ocrEngine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-  if (-not $script:ocrEngine) { Fail "ERR_NO_OCR" "no Windows OCR language pack installed" }
   $script:ocrReady = $true
 }
-function Await($t, $rt) { $m = $script:asTask.MakeGenericMethod($rt); $nt = $m.Invoke($null, @($t)); $nt.Wait(-1) | Out-Null; return $nt.Result }
+# OCR engine: -Lang <tag> forces one language, otherwise the user profile languages (created lazily, cached)
+function Get-OcrEngine($lang) {
+  if ($lang) {
+    if (-not $script:ocrLangEngines) { $script:ocrLangEngines = @{} }
+    $e = $script:ocrLangEngines[$lang]
+    if ($null -eq $e) {
+      try { $e = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new($lang)) } catch { $e = $null }
+      if ($null -eq $e) { Fail "ERR_NO_OCR" ("no OCR language pack for '" + $lang + "'") }
+      $script:ocrLangEngines[$lang] = $e
+    }
+    return $e
+  }
+  if (-not $script:ocrEngine) {
+    $script:ocrEngine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if (-not $script:ocrEngine) { Fail "ERR_NO_OCR" "no Windows OCR language pack installed (or pass -Lang <tag>, e.g. -Lang zh-Hans-CN)" }
+  }
+  return $script:ocrEngine
+}
+# WinRT async -> sync with a hard timeout: a hung OCR call used to block the whole resident daemon forever
+function Await($t, $rt, [int]$timeoutMs = 15000) {
+  $m = $script:asTask.MakeGenericMethod($rt)
+  $nt = $m.Invoke($null, @($t))
+  if (-not $nt.Wait($timeoutMs)) { Fail "ERR_OCR_TIMEOUT" ("WinRT call did not finish within " + $timeoutMs + "ms") }
+  return $nt.Result
+}
 
 # returns @{ lines = [ @{text; words=[@{t;x;y;w;h}]} ]; map = scriptblock(x,y)->(fx,fy) ; k = factor }
 function Get-Ocr($a) {
   Initialize-Ocr
+  $eng = Get-OcrEngine (P $a 'Lang' "")
   $mapK = 1.0; $fr = $null; $cap = $null; $res = $null; $pf = 1.0
   if (Has $a 'Path') {
     $img = (Resolve-Path $a.Path).Path
@@ -321,7 +406,7 @@ function Get-Ocr($a) {
     $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
     $dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
     $bmp = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-    $res = Await ($script:ocrEngine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
+    $res = Await ($eng.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
     $stream.Dispose()
   }
   else {
@@ -355,14 +440,19 @@ function Get-Ocr($a) {
       }
       $bytes = [CU.Core]::Bgra($bm); $bw = $bm.Width; $bh = $bm.Height
     } finally { if ($bm) { $bm.Dispose() } }
-    # same pixels as the previous pass (wait -Find polling, repeated find on one screen) -> reuse the OCR result
+    # same pixels + same pass as before (wait -Find polling, repeated find on one screen) -> reuse the OCR result.
+    # Two slots (plain / prep) so the plain and the pre-processed pass no longer evict each other: on a static
+    # screen a repeated find or a wait poll costs no OCR at all.
     $key = "$hw|$rl,$rt,$rr,$rb|$($script:ocrPrep)|${bw}x$bh|" + [CU.Core]::QuickHash($bytes)
-    if ($script:ocrCache -and $script:ocrCache.key -eq $key) { $res = $script:ocrCache.res; $script:ocrCached = $true }
+    if (-not $script:ocrCache) { $script:ocrCache = @{} }
+    $slot = if ($script:ocrPrep) { "prep" } else { "plain" }
+    $ent = $script:ocrCache[$slot]
+    if ($null -ne $ent -and $ent.key -eq $key) { $res = $ent.res; $script:ocrCached = $true }
     else {
       $buf = [System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions]::AsBuffer($bytes)
       $sb = [Windows.Graphics.Imaging.SoftwareBitmap]::CreateCopyFromBuffer($buf, [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, $bw, $bh, [Windows.Graphics.Imaging.BitmapAlphaMode]::Ignore)
-      try { $res = Await ($script:ocrEngine.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult]) } finally { $sb.Dispose() }
-      $script:ocrCache = @{ key = $key; res = $res }; $script:ocrCached = $false
+      try { $res = Await ($eng.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult]) } finally { $sb.Dispose() }
+      $script:ocrCache[$slot] = @{ key = $key; res = $res }; $script:ocrCached = $false
     }
   }
   # map OCR pixel -> reference frame image coords
@@ -387,34 +477,112 @@ function Box($ws) {
   return @{ x = [int]$l; y = [int]$t; w = [int]($r - $l); h = [int]($b - $t); cx = [int](($l + $r) / 2); cy = [int](($t + $b) / 2) }
 }
 function Norm($s) { return ($s -replace '\s', '').ToLowerInvariant() }
+# level-2 normalization: fold full-width ASCII to half-width and strip punctuation/symbols (OCR often reads
+# "OK:" for "OK" or full-width digits for plain ones)
+function Norm2($s) {
+  $t = Norm $s
+  $sb = New-Object System.Text.StringBuilder($t.Length + 4)
+  foreach ($ch in $t.ToCharArray()) {
+    $code = [int]$ch
+    if ($code -ge 0xFF01 -and $code -le 0xFF5E) { $ch = [char]($code - 0xFEE0) }
+    elseif ($code -eq 0x3000) { continue }
+    if ([char]::IsPunctuation($ch) -or [char]::IsSymbol($ch)) { continue }
+    [void]$sb.Append($ch)
+  }
+  return $sb.ToString()
+}
+# level-3 helper: fold the classic OCR confusions (0/O, 1/l/I, 5/S, 8/B, 2/Z, 6/G, 9/q) on both sides
+function Fold($s) {
+  $sb = New-Object System.Text.StringBuilder($s.Length + 4)
+  foreach ($ch in $s.ToCharArray()) {
+    switch ($ch) {
+      'o' { $ch = '0' } 'i' { $ch = '1' } 'l' { $ch = '1' } 's' { $ch = '5' }
+      'b' { $ch = '8' } 'z' { $ch = '2' } 'g' { $ch = '6' } 'q' { $ch = '9' }
+    }
+    [void]$sb.Append([char]$ch)
+  }
+  return $sb.ToString()
+}
+function HitBoxJson($h) { return '{"x":' + $h.x + ',"y":' + $h.y + ',"w":' + $h.w + ',"h":' + $h.h + '}' }
+function HitJson($h) { return '{"text":' + (Q $h.text) + ',"x":' + $h.x + ',"y":' + $h.y + ',"w":' + $h.w + ',"h":' + $h.h + ',"cx":' + $h.cx + ',"cy":' + $h.cy + ',"match":' + (Q $h.match) + '}' }
 
-# all matches of the query (whitespace-insensitive: Windows OCR puts spaces between CJK characters)
-function Search-Text($lines, $query) {
-  $q = Norm $query
-  $hits = @()
+# per-line index for the three matching levels (built once per OCR pass, shared by every query/alternative)
+function New-LineIndex($lines) {
+  $out = @()
   foreach ($ln in $lines) {
     $cat = ""; $own = @()
-    for ($i = 0; $i -lt $ln.words.Count; $i++) { $n = Norm $ln.words[$i].t; $cat += $n; for ($c = 0; $c -lt $n.Length; $c++) { $own += $i } }
-    $pos = $cat.IndexOf($q)
-    while ($q.Length -gt 0 -and $pos -ge 0) {
-      $w0 = $own[$pos]; $w1 = $own[$pos + $q.Length - 1]
-      $bx = Box ($ln.words[$w0..$w1])
-      $bx.text = $ln.text
-      $hits += , $bx
-      $pos = $cat.IndexOf($q, $pos + 1)
+    $cat2 = ""; $own2 = @()
+    for ($i = 0; $i -lt $ln.words.Count; $i++) {
+      $n = Norm $ln.words[$i].t; $cat += $n; for ($c = 0; $c -lt $n.Length; $c++) { $own += $i }
+      $m = Norm2 $ln.words[$i].t; $cat2 += $m; for ($c = 0; $c -lt $m.Length; $c++) { $own2 += $i }
+    }
+    $out += , @{ ln = $ln; cat = $cat; own = $own; cat2 = $cat2; own2 = $own2; catf = (Fold $cat2) }
+  }
+  return , $out
+}
+function New-Hit($e, [int]$pos, [int]$len, $own, [int]$level) {
+  $w0 = $own[$pos]
+  $w1 = $own[[Math]::Min($pos + $len - 1, $own.Count - 1)]
+  $bx = Box ($e.ln.words[$w0..$w1])
+  $bx.text = $e.ln.text
+  $bx.match = @('exact', 'norm', 'fuzzy')[$level]
+  $bx.level = $level
+  return $bx
+}
+# one query, three levels: exact substring (the pre-6.1 behaviour) -> normalized -> fuzzy (folded + edit <=1)
+function Search-Index($idx, $q, [bool]$strict) {
+  $qn = Norm $q
+  $qn2 = Norm2 $q
+  $qf = Fold $qn2
+  $hits = @()
+  if ($qn.Length -eq 0) { return $hits }
+  foreach ($e in $idx) {
+    $pos = $e.cat.IndexOf($qn)
+    while ($pos -ge 0) { $hits += , (New-Hit $e $pos $qn.Length $e.own 0); $pos = $e.cat.IndexOf($qn, $pos + 1) }
+  }
+  if ($hits.Count -or $strict) { return $hits }
+  if ($qn2.Length -gt 0) {
+    foreach ($e in $idx) {
+      $pos = $e.cat2.IndexOf($qn2)
+      while ($pos -ge 0) { $hits += , (New-Hit $e $pos $qn2.Length $e.own2 1); $pos = $e.cat2.IndexOf($qn2, $pos + 1) }
+    }
+  }
+  if ($hits.Count) { return $hits }
+  if ($qf.Length -gt 0) {
+    foreach ($e in $idx) {
+      $pos = $e.catf.IndexOf($qf)
+      while ($pos -ge 0) { $hits += , (New-Hit $e $pos $qf.Length $e.own2 2); $pos = $e.catf.IndexOf($qf, $pos + 1) }
+    }
+  }
+  if ($hits.Count) { return $hits }
+  foreach ($e in $idx) {           # edit distance <= 1, scanned in C# (fast even on a full screen of text)
+    foreach ($p in (ConvertFrom-Json -InputObject ([CU.Core]::FuzzyHits($e.cat2, $qn2, 20)))) {
+      $hits += , (New-Hit $e ([int]$p) ([int]$qn2.Length) $e.own2 2)
     }
   }
   return $hits
+}
+# one or more alternatives: -Find "a|b|c" runs them all over the same OCR pass (no extra OCR) and
+# returns the hits ranked by match quality (exact > norm > fuzzy), keeping the alternative order on ties
+function Search-Query($idx, $qraw) {
+  $strict = [bool]$script:strictFind
+  $qs = @(@($qraw -split '\|') | Where-Object { $_ -ne "" })
+  if ($qs.Count -eq 0) { $qs = @($qraw) }
+  $all = @(); $ord = 0
+  foreach ($q in $qs) {
+    foreach ($h in @(Search-Index $idx $q $strict)) { $h.ord = $ord; $ord++; $all += , $h }
+  }
+  return @($all | Sort-Object -Property @{ Expression = { $_.level } }, @{ Expression = { $_.ord } })
 }
 # normal OCR pass; only if nothing was found, a pre-processed pass (2x + adaptive binarisation, handles
 # white-on-colour buttons, dark mode, small text)
 function Search-Hits($a, $q) {
   $script:ocrPrep = $false; $script:ocrPass = "plain"
-  $hits = @(Search-Text (Get-Ocr $a) $q)
+  $hits = @(Search-Query (New-LineIndex (Get-Ocr $a)) $q)
   if ($hits.Count -eq 0) {
     $b = @{}; foreach ($k in @($a.get_Keys())) { $b[$k] = $a[$k] }
     $script:ocrPrep = $true; $script:ocrPass = "prep"
-    try { $hits = @(Search-Text (Get-Ocr $b) $q) } finally { $script:ocrPrep = $false }
+    try { $hits = @(Search-Query (New-LineIndex (Get-Ocr $b)) $q) } finally { $script:ocrPrep = $false }
   }
   return $hits
 }
@@ -423,22 +591,42 @@ function Find-Text($a) {
   if (-not $q) { Fail "ERR_ARGS" "need -Find or -FindB64" }
   $hits = @(Search-Hits $a $q)
   $i = [int](P $a 'Index' 1)
-  if ($hits.Count -lt $i) { Fail "ERR_TEXT_NOT_FOUND" ("'" + $q + "' not found on screen (OCR); found " + $hits.Count + " match(es)") }
-  return $hits[$i - 1]
+  if ($hits.Count -lt $i) { Fail "ERR_TEXT_NOT_FOUND" ("'" + $q + "' not found on screen (OCR " + $script:ocrPass + " pass); found " + $hits.Count + " match(es)") }
+  $h = $hits[$i - 1]
+  $h.all = $hits
+  $h.query = $q
+  return $h
 }
-function HitJson($h) { return '{"text":' + (Q $h.text) + ',"x":' + $h.x + ',"y":' + $h.y + ',"w":' + $h.w + ',"h":' + $h.h + ',"cx":' + $h.cx + ',"cy":' + $h.cy + '}' }
 
-# ------------------------------------------------------------------ post-action: settle + optional after-snap
+# ------------------------------------------------------------------ post-action: hints + settle + optional after-snap
+# machine-readable "why did nothing happen" hints, so the agent does not spend a round trip on the diagnosis
+function Add-Hints($a, $ctx, $json) {
+  $hints = @()
+  if ($json -match '"changed":([0-9.]+)' -and [double]$Matches[1] -lt 0.15) {
+    if ($ctx.chromium) { $hints += "Chromium/Electron/Qt window: background input is often ignored - -Fg usually works (needs user permission), or set CU_FG_AUTO=1" }
+    else { $hints += "no visible change within the quiet window - check the after frame, or raise -Quiet for slow apps" }
+  }
+  if ($json -match '"in_client":false') { $hints += "the click landed outside the client area (title bar/border): background messages there are ignored by most apps" }
+  if ($hints.Count) { $json = Merge $json ('"hint":' + (Q ($hints -join '; '))) }
+  return $json
+}
 function Complete-Action($a, $ctx, $json, $before) {
   if (IsErr $json) { if ($null -ne $before) { Close-Before $before }; return $json }
   if ($ctx.note) { $json = Merge $json ($ctx.note.TrimStart(',')) }
   if ($null -ne $before) {
-    $json = Merge $json ([CU.Core]::Settle($ctx.hw, $before.full, $before.roi, $before.sx, $before.sy, [int](P $a 'Settle' 1000), [int](P $a 'Quiet' 400)))
+    $json = Merge $json ([CU.Core]::Settle($ctx.hw, $before.full, $before.roi, $before.sx, $before.sy, [int](P $a 'Settle' 1000), (Get-Quiet $a)))
     Close-Before $before
   }
+  $json = Add-Hints $a $ctx $json
   if ($null -ne $script:verifyText) {
-    $st = ""; $pid0 = 0; if ($null -ne $ctx.frame) { $pid0 = $ctx.frame.pid }
-    $v = [CU.Uia]::FocusedText($pid0, 800, [ref]$st)
+    $st = ""; $v = $null
+    # a known edit control is read with WM_GETTEXT: synchronous and immune to UIA value staleness
+    $hv = [int64]$script:verifyHwnd
+    if ($hv -ne 0 -and [bool]$script:verifyIsEdit) { $v = [CU.Core]::TextOf($hv); if ($null -ne $v) { $st = "edit" } }
+    if ($null -eq $v) {
+      $pid0 = 0; if ($null -ne $ctx.frame) { $pid0 = $ctx.frame.pid }
+      $v = [CU.Uia]::FocusedText($pid0, 800, [ref]$st)
+    }
     $frag = '"verify":{"source":' + (Q $st)
     if ($null -ne $v) {
       $has = (Norm $v).Contains((Norm $script:verifyText))
@@ -447,6 +635,7 @@ function Complete-Action($a, $ctx, $json, $before) {
     }
     $json = Merge $json ($frag + '}')
     $script:verifyText = $null
+    $script:verifyHwnd = 0
   }
   if ([bool](P $a 'Snap' $false)) {
     $b = @{}; foreach ($k in @('Out', 'MaxSide', 'MaxPixels', 'Quality', 'Grid', 'Method', 'Marks', 'Uia', 'Text2', 'UiaTimeout')) { if (Has $a $k) { $b[$k] = $a[$k] } }
@@ -469,6 +658,7 @@ function Get-Before($a, $ctx) {
 function Invoke-Cu($a) {
   $cmd = ("" + (P $a 'Cmd' 'help')).ToLowerInvariant()
   $script:findInfo = $null
+  $script:strictFind = [bool](P $a 'Strict' $false)
   switch -Regex ($cmd) {
     '^info$' { return [CU.Core]::InfoJson([bool](P $a 'All' $false), (P $a 'Title' "")) }
     '^snap$' { return Invoke-Snap $a ([int64](Resolve-Window $a)) $true }
@@ -476,8 +666,16 @@ function Invoke-Cu($a) {
       $fr = Get-Frame $a
       $hw = [int64](Resolve-Window $a); if ($hw -eq 0 -and $null -ne $fr) { $hw = $fr.hwnd }
       if ($hw -eq 0) { Fail "ERR_NO_WINDOW" "els needs -Title/-Proc/-Hwnd or a frame" }
-      $l = [CU.Uia]::Collect($hw, [int](P $a 'UiaTimeout' 1500), [bool](P $a 'Text2' $false), 400)
-      $out = '{"ok":true,"status":' + (Q ([CU.Uia]::LastStatus)) + ',"ms":' + [CU.Uia]::LastMs + ',"count":' + $l.Count
+      $l = $null; $st = $null; $ms = 0
+      if (Test-UiaDead $hw $a) {
+        $l = New-Object 'System.Collections.Generic.List[CU.El]'
+        $st = "skipped (this process timed out on UIA before; -UiaForce retries)"
+      } else {
+        $l = [CU.Uia]::Collect($hw, [int](P $a 'UiaTimeout' 1500), [bool](P $a 'Text2' $false), [int](P $a 'Size' 400))
+        $st = [CU.Uia]::LastStatus; $ms = [CU.Uia]::LastMs
+        Mark-UiaDead $hw $st
+      }
+      $out = '{"ok":true,"status":' + (Q $st) + ',"ms":' + $ms + ',"count":' + $l.Count
       if ($null -ne $fr -and $fr.hwnd -eq $hw -and -not $fr.Check($false)) { $out += ',"space":"frame","elements":' + [CU.Uia]::ListJson($l, $fr) }
       else {
         $items = @(); foreach ($e in $l) { $items += ('[' + $e.id + ',' + (Q $e.type) + ',' + (Q $e.name) + ',' + $e.Cx + ',' + $e.Cy + ']') }
@@ -495,10 +693,30 @@ function Invoke-Cu($a) {
       $ctx = Get-Target $a $true ($act -eq 'drag')
       $before = Get-Before $a $ctx
       $mods = ModBits (P $a 'Mods' "")
-      if ([bool](P $a 'Fg' $false)) {
-        $j = [CU.Core]::FgMouse($ctx.hw, $ctx.sx, $ctx.sy, $btn, $act, $mods, $ctx.sx2, $ctx.sy2, [int](P $a 'Wheel' -3), -not [bool](P $a 'KeepCursor' $false))
-      } else {
-        $j = [CU.Core]::BgMouse($ctx.hw, $ctx.sx, $ctx.sy, $btn, $act, $mods, $ctx.sx2, $ctx.sy2, [int](P $a 'Wheel' -3))
+      $um = ("" + (P $a 'Method' 'auto')).ToLowerInvariant()      # click-only method: auto|uia|coord
+      $fg = [bool](P $a 'Fg' $false)
+      $fauto = $false
+      if (-not $fg -and (Test-FgAuto $a $ctx.hw)) { $fg = $true; $fauto = $true }
+      if ($fauto) { $ctx.chromium = $false } elseif (Test-Chromium $ctx.hw) { $ctx.chromium = $true }
+      $j = $null
+      # UIA direct control action: no coordinates, no background messages; a disabled element is refused
+      if (-not $fg -and $um -ne 'coord' -and $null -ne $ctx.el -and $act -eq 'click' -and $btn -eq 'left' -and $mods -eq 0) {
+        $el = $ctx.el
+        if (-not $el.enabled) { return (Err "ERR_DISABLED" ("element #" + $el.id + " (" + $el.type + " " + $el.name + ") is disabled - not clicking")) }
+        $st = ""; $r = [CU.Uia]::Act($ctx.hw, $el.type, $el.name, $el.l, $el.t, $el.r, $el.b, 800, [ref]$st)
+        if ($null -ne $r) {
+          $j = '{"ok":true,"mode":"bg","act":"click","method":"uia","via":' + (Q $r) + ',"el":' + (ElJson $el) + '}'
+          $ctx.note = ""
+        }
+      }
+      if ($null -eq $j) {
+        if ($fg) {
+          $j = [CU.Core]::FgMouse($ctx.hw, $ctx.sx, $ctx.sy, $btn, $act, $mods, $ctx.sx2, $ctx.sy2, [int](P $a 'Wheel' -3), -not [bool](P $a 'KeepCursor' $false))
+          if ($fauto -and -not (IsErr $j)) { $j = Merge $j '"fg_auto":true' }
+        } else {
+          $j = [CU.Core]::BgMouse($ctx.hw, $ctx.sx, $ctx.sy, $btn, $act, $mods, $ctx.sx2, $ctx.sy2, [int](P $a 'Wheel' -3))
+          if (-not (IsErr $j)) { $j = Merge $j '"method":"coord"' }
+        }
       }
       return Complete-Action $a $ctx $j $before
     }
@@ -508,42 +726,72 @@ function Invoke-Cu($a) {
       if (-not $ks) { Fail "ERR_ARGS" "need -Keys, e.g. -Keys ctrl+s  or  -Keys 'ctrl+a delete'" }
       $ctx = Get-Target $a $false $false
       $before = Get-Before $a $ctx
+      $fg = [bool](P $a 'Fg' $false); $fauto = $false
+      if (-not $fg -and (Test-FgAuto $a $ctx.hw)) { $fg = $true; $fauto = $true }
+      if ($fauto) { $ctx.chromium = $false } elseif (Test-Chromium $ctx.hw) { $ctx.chromium = $true }
       $res = @()
       foreach ($k in ($ks -split '\s+' | Where-Object { $_ })) {
-        if ([bool](P $a 'Fg' $false)) { $j = [CU.Core]::FgKey($ctx.hw, $k, [int](P $a 'Repeat' 1)) }
+        if ($fg) { $j = [CU.Core]::FgKey($ctx.hw, $k, [int](P $a 'Repeat' 1)) }
         else { $j = [CU.Core]::BgKey($ctx.hw, $k, 0, [int](P $a 'Repeat' 1)) }
         if (IsErr $j) { return $j }
         $res += $j
       }
       $j = if ($res.Count -eq 1) { $res[0] } else { '{"ok":true,"seq":[' + ($res -join ',') + ']}' }
+      if ($fauto) { $j = Merge $j '"fg_auto":true' }
       return Complete-Action $a $ctx $j $before
     }
 
     '^type$' {
       $t = Get-Text $a 'Text' 'TextB64' 'TextFile'
       if ($null -eq $t) { Fail "ERR_ARGS" "need -Text / -TextB64 (UTF-8 base64, safest for non-ASCII) / -TextFile" }
-      $havePt = (Has $a 'X') -or (Has $a 'Find') -or (Has $a 'FindB64')
+      # -Id / -Name locate the field too (click it first, then type) - the docs promised this, the code did not
+      $havePt = (Has $a 'X') -or (Has $a 'Find') -or (Has $a 'FindB64') -or
+                ((Has $a 'Id') -and [int]$a.Id -gt 0) -or (Has $a 'Name') -or (Has $a 'NameB64')
       $ctx = Get-Target $a $havePt $false
       $before = Get-Before $a $ctx
-      $fg = [bool](P $a 'Fg' $false)
+      $fg = [bool](P $a 'Fg' $false); $fauto = $false
+      if (-not $fg -and (Test-FgAuto $a $ctx.hw)) { $fg = $true; $fauto = $true }
+      if ($fauto) { $ctx.chromium = $false } elseif (Test-Chromium $ctx.hw) { $ctx.chromium = $true }
       $m = ("" + (P $a 'Method' 'auto')).ToLowerInvariant()
       $tgt = 0
       if ($havePt) {   # focus the field first
         if ($fg) { $c = [CU.Core]::FgMouse($ctx.hw, $ctx.sx, $ctx.sy, 'left', 'click', 0, 0, 0, 0, -not [bool](P $a 'KeepCursor' $false)) }
         else { $c = [CU.Core]::BgMouse($ctx.hw, $ctx.sx, $ctx.sy, 'left', 'click', 0, 0, 0, 0); $tgt = [CU.Core]::ChildAt($ctx.hw, $ctx.sx, $ctx.sy) }
         if (IsErr $c) { return $c }
-        Start-Sleep -Milliseconds 60
+        if ($fg) { Sleep-Fast 30 60 }
+        else { [void][CU.Core]::WaitFocus($ctx.hw, $tgt, 300) }   # wait for the click to be processed (not a fixed guess)
       }
+      $script:verifyHwnd = 0; $script:verifyIsEdit = $false
+      if ($tgt -ne 0 -and [CU.Core]::IsClassicEdit([CU.Core]::ClsOf($tgt))) { $script:verifyHwnd = $tgt; $script:verifyIsEdit = $true }
+      $pid0 = 0; if ($null -ne $ctx.frame) { $pid0 = $ctx.frame.pid }
       $useClip = ($m -eq 'clip' -or $m -eq 'paste') -or ($fg -and $m -eq 'auto' -and $t.Length -gt 400)
       if ($useClip) {
-        $old = $null; try { $old = Get-Clipboard -Raw -ErrorAction Stop } catch { }
-        try { Set-Clipboard -Value $t -ErrorAction Stop } catch { return (Err "ERR_CLIPBOARD" $_.Exception.Message) }
-        if ($fg) { $j = [CU.Core]::FgPaste($ctx.hw) } else { $j = [CU.Core]::BgText($ctx.hw, $t, 'paste', $tgt) }
-        Start-Sleep -Milliseconds 350
-        try { if ($null -ne $old) { Set-Clipboard -Value $old } } catch { }
+        $old = $null; try { $old = [CU.Core]::ClipGet() } catch { }
+        # a paste message can be processed before the control finished reacting to the focusing click, and some
+        # toolkits ignore the first one outright: verify with a synchronous read and paste again until it lands
+        $landed = $false
+        for ($try = 0; $try -lt 3 -and -not $landed; $try++) {
+          if ($havePt) { Sleep-Fast $(if ($try -eq 0) { 40 } else { 80 }) $(if ($try -eq 0) { 120 } else { 200 }) }
+          if (-not [CU.Core]::ClipSet($t)) { return (Err "ERR_CLIPBOARD" "could not put the text on the clipboard") }
+          $pr = if ($fg) { [CU.Core]::FgPaste($ctx.hw) } else { [CU.Core]::BgText($ctx.hw, $t, 'paste', $tgt) }
+          if (IsErr $pr) { $j = $pr; break }
+          $j = $pr
+          $sw2 = [Diagnostics.Stopwatch]::StartNew()
+          while ($sw2.ElapsedMilliseconds -lt 220) {
+            if ($script:verifyIsEdit) {
+              $vt = [CU.Core]::TextOf($tgt)
+              if ($null -ne $vt -and (Norm $vt).Contains((Norm $t))) { $landed = $true; break }
+            }
+            $st = ""; $vv = [CU.Uia]::FocusedText($pid0, 150, [ref]$st)
+            if ($null -ne $vv -and (Norm $vv).Contains((Norm $t))) { $landed = $true; break }
+            Start-Sleep -Milliseconds 40
+          }
+        }
+        try { if ($null -ne $old) { [void][CU.Core]::ClipSet($old) } } catch { }
       } elseif ($fg) { $j = [CU.Core]::FgText($ctx.hw, $t) }
       else { $j = [CU.Core]::BgText($ctx.hw, $t, $m, $tgt) }
       if (IsErr $j) { return $j }
+      if ($fauto) { $j = Merge $j '"fg_auto":true' }
       if ([bool](P $a 'Verify' $false) -and -not [bool](P $a 'Enter' $false)) { $script:verifyText = $t }
       if ([bool](P $a 'Enter' $false)) {
         $e = if ($fg) { [CU.Core]::FgKey($ctx.hw, 'enter', 1) } else { [CU.Core]::BgKey($ctx.hw, 'enter', $tgt, 1) }
@@ -568,14 +816,22 @@ function Invoke-Cu($a) {
 
     '^ocr$' {
       $lines = Get-Ocr $a
-      $items = @(); foreach ($ln in $lines) { $bx = Box $ln.words; $bx.text = $ln.text; $items += (HitJson $bx) }
-      return '{"ok":true,"space":' + (Q $script:ocrSpace) + ',"cached":' + $(if ($script:ocrCached) { 'true' } else { 'false' }) + ',"lines":[' + ($items -join ',') + ']}'
+      $cap = [int](P $a 'Max' 0); if ($cap -le 0) { $cap = 300 }
+      $items = @(); foreach ($ln in $lines) { $bx = Box $ln.words; $bx.text = $ln.text; $bx.match = "-"; $items += (HitJson $bx) }
+      $tr = $items.Count -gt $cap
+      if ($tr) { $items = $items[0..($cap - 1)] }
+      return '{"ok":true,"space":' + (Q $script:ocrSpace) + ',"cached":' + $(if ($script:ocrCached) { 'true' } else { 'false' }) +
+             ',"lines":[' + ($items -join ',') + '],"count":' + $items.Count + ',"truncated":' + $(if ($tr) { 'true' } else { 'false' }) + '}'
     }
     '^find$' {
       $q = Get-Text $a 'Find' 'FindB64' $null
       if (-not $q) { Fail "ERR_ARGS" "need -Find or -FindB64" }
       $hits = @(Search-Hits $a $q)
-      return '{"ok":' + $(if ($hits.Count) { 'true' } else { 'false' }) + ',"space":' + (Q $script:ocrSpace) + ',"pass":' + (Q $script:ocrPass) + ',"cached":' + $(if ($script:ocrCached) { 'true' } else { 'false' }) + ',"query":' + (Q $q) + ',"hits":[' + (($hits | ForEach-Object { HitJson $_ }) -join ',') + ']' + $(if (-not $hits.Count) { ',"err":"ERR_TEXT_NOT_FOUND"' } else { '' }) + '}'
+      $json = '{"ok":' + $(if ($hits.Count) { 'true' } else { 'false' }) + ',"space":' + (Q $script:ocrSpace) + ',"pass":' + (Q $script:ocrPass) +
+              ',"cached":' + $(if ($script:ocrCached) { 'true' } else { 'false' }) + ',"query":' + (Q $q) + ',"count":' + $hits.Count +
+              ',"hits":[' + (($hits | ForEach-Object { HitJson $_ }) -join ',') + ']'
+      if ($hits.Count) { return $json + '}' }
+      return $json + ',"err":"ERR_TEXT_NOT_FOUND"}'
     }
 
     '^wait$' {
@@ -587,7 +843,7 @@ function Invoke-Cu($a) {
           $hits = @(Search-Hits $a $q)
           if ($hits.Count) { return '{"ok":true,"found":' + (HitJson $hits[0]) + ',"ms":' + $sw.ElapsedMilliseconds + '}' }
           if ($sw.ElapsedMilliseconds -ge $to) { return (Err "ERR_TIMEOUT" ("'" + $q + "' did not appear within " + $to + "ms")) }
-          Start-Sleep -Milliseconds 250
+          Start-Sleep -Milliseconds 200
         }
       }
       if ([bool](P $a 'Stable' $false)) {
@@ -606,7 +862,7 @@ function Invoke-Cu($a) {
       foreach ($s in $steps) {
         $i++
         $b = @{}
-        foreach ($k in @('Title', 'Proc', 'Hwnd', 'Fg', 'Force', 'Method', 'KeepCursor', 'NoSnapTo', 'Browser')) { if (Has $a $k) { $b[$k] = $a[$k] } }
+        foreach ($k in @('Title', 'Proc', 'Hwnd', 'Fg', 'Force', 'Method', 'KeepCursor', 'NoSnapTo', 'Browser', 'Strict', 'Lang', 'Max', 'UiaForce', 'FgAuto', 'BgForce')) { if (Has $a $k) { $b[$k] = $a[$k] } }
         $b['Settle'] = 0                                  # batch default: no settle wait unless the step asks
         foreach ($pp in $s.PSObject.Properties) { $b[$pp.Name] = $pp.Value }
         if ($b.ContainsKey('a') -and -not $b.ContainsKey('Cmd')) { $b['Cmd'] = $b['a'] }
@@ -675,7 +931,7 @@ function Invoke-Cu($a) {
           $ks = P $a 'Keys' ""; if (-not $ks) { Fail "ERR_ARGS" "web keys needs -Keys" }
           $r = [CU.Web]::Keys($br, $ks, [int](P $a 'Repeat' 1), (P $a 'Sel' ""), $wid)
         }
-        '^(text|txt)$' { $r = [CU.Web]::Text($br, (P $a 'Sel' "")) }
+        '^(text|txt)$' { $r = [CU.Web]::Text($br, (P $a 'Sel' ""), [int](P $a 'Max' 0)) }
         '^(val|value)$' { $r = [CU.Web]::Value($br, (P $a 'Sel' ""), $wid) }
         '^info$' { $r = [CU.Web]::Info($br) }
         '^eval$' {
@@ -767,7 +1023,7 @@ function Invoke-Serve([string]$name, [int]$idleMin) {
             if ($argv.Count -gt 0 -and $argv[0] -eq '__stop') { $stop = $true; $res = '{"ok":true,"daemon":"stopping"}' }
             else {
               if ($req.cwd -and (Test-Path -LiteralPath $req.cwd)) { Set-Location -LiteralPath $req.cwd; [Environment]::CurrentDirectory = $req.cwd }
-              $script:verifyText = $null; $script:ocrPrep = $false; $script:ocrCached = $false
+              $script:verifyText = $null; $script:verifyHwnd = 0; $script:verifyIsEdit = $false; $script:ocrPrep = $false; $script:ocrCached = $false
               $h = Invoke-Parse $parser $argv
               if ($h['Cmd'] -eq 'serve') { $res = (Err "ERR_ARGS" "nested serve") } else { $res = Invoke-Cu $h }
             }
