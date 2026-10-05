@@ -58,7 +58,7 @@ set CU="<技能目录>\..\..\win\cu.exe"
 | `key` | 按键/组合键，空格分隔为序列 | `-Keys "ctrl+a delete"` `-Repeat n` |
 | `type` | 输入文字（给 `-X/-Id/-Name/-Find` 时先点击该控件再输入） | `-Text` / `-TextB64`（UTF-8 base64，中文最稳）/ `-TextFile`；`-X -Y` / `-Id` / `-Name` / `-Find`；`-Enter`；`-Verify`（读回核对：标准编辑框用 `WM_GETTEXT` 精确读，`source:"edit"`；其他控件走 UIA）；`-Method auto/replacesel/char/clip` |
 | `mark` | 点前预览：画准星 + 生成 4× 放大核对图 | `-X -Y` 或 `-Pts "x:y,x:y"`；`-Zoom 24`（0=不出放大图） |
-| `find` | OCR 找字，返回帧图坐标（中心 cx,cy）；`match`=命中级别（exact/norm/fuzzy）、`pass`（plain/prep）、`cached`（画面未变，复用上次识别） | `-Find 文字`（或 `"a\|b\|c"` 多候选、`-FindB64`）`-Index n` `-Strict`（关闭模糊级）`-Region x,y,w,h`（只识别帧图的一块，快 3–8 倍）`-Lang zh-Hans-CN` |
+| `find` | OCR 找字，返回帧图坐标（中心 cx,cy）；`match`=命中级别（exact/norm/fuzzy）、`pass`（plain/prep）、`cached`（画面未变，复用上次识别） | `-Find 文字`（或 `"a\|b\|c"` 多候选、`-FindB64`）`-Index n` `-Strict`（关闭模糊级）`-Region x,y,w,h`（只识别帧图的一块，快 3–8 倍）`-Method auto/screen/print`（老程序文字 OCR 不准时用 print，见 REFERENCE）`-Lang zh-Hans-CN` |
 | `ocr` | 全部文字行 + 坐标（帧图坐标） | `-Path 图片`（识别指定图片）；`-Region x,y,w,h`（只识别帧图一块，快）；`-Method auto/screen/print`；`-Max 行数`（默认 300，超出给 `truncated:true`）；`-Lang` |
 | `wait` | 等文字出现 / 等画面稳定 / 固定等待 | `-Find 文字 -Timeout 8000` / `-Stable` / `-Ms 300` |
 | `activate` | 把目标窗口置前（前台模式前用） | |
