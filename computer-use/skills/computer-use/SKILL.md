@@ -56,7 +56,7 @@ set CU="<技能目录>\..\..\win\cu.exe"
 | `drag` | 拖拽 | `-X -Y -X2 -Y2` |
 | `scroll` / `hscroll` | 滚轮（负=向下/向左） | `-X -Y -Wheel -3` |
 | `key` | 按键/组合键，空格分隔为序列 | `-Keys "ctrl+a delete"` `-Repeat n` |
-| `type` | 输入文字（给 `-X/-Id/-Name/-Find` 时先点击该控件再输入） | `-Text` / `-TextB64`（UTF-8 base64，中文最稳）/ `-TextFile`；`-X -Y` / `-Id` / `-Name` / `-Find`；`-Enter`；`-Verify`（读回核对：标准编辑框用 `WM_GETTEXT` 精确读，`source:"edit"`；其他控件走 UIA）；`-Method auto/replacesel/char/clip` |
+| `type` | 输入文字（给 `-X/-Id/-Name/-Find` 时先点击该控件再输入） | `-Text` / `-TextB64`（UTF-8 base64，中文最稳）/ `-TextFile`；`-X -Y` / `-Id` / `-Name` / `-Find`；`-Enter`（自带兜底：回车被页面吞成换行时自动清掉并点表单的提交按钮，返回 `enterVia:"submit-click"`）；`-Verify`（读回核对：标准编辑框用 `WM_GETTEXT` 精确读，`source:"edit"`；其他控件走 UIA）；`-Method auto/replacesel/char/clip` |
 | `mark` | 点前预览：画准星 + 生成 4× 放大核对图 | `-X -Y` 或 `-Pts "x:y,x:y"`；`-Zoom 24`（0=不出放大图） |
 | `find` | OCR 找字，返回帧图坐标（中心 cx,cy）；`match`=命中级别（exact/norm/fuzzy）、`pass`（plain/prep）、`cached`（画面未变，复用上次识别） | `-Find 文字`（或 `"a\|b\|c"` 多候选、`-FindB64`）`-Index n` `-Strict`（只认精确子串，跳过归一化与模糊两级）`-Region x,y,w,h`（只识别帧图的一块，快 3–8 倍）`-Method auto/screen/print`（老程序文字 OCR 不准时用 print，见 REFERENCE）`-Lang zh-Hans-CN` |
 | `ocr` | 全部文字行 + 坐标（帧图坐标） | `-Path 图片`（识别指定图片）；`-Region x,y,w,h`（只识别帧图一块，快）；`-Method auto/screen/print`；`-Max 行数`（默认 300，超出给 `truncated:true`）；`-Lang` |
@@ -69,6 +69,7 @@ set CU="<技能目录>\..\..\win\cu.exe"
 通用：`-Frame <帧文件或图片路径>` 指定用哪张截图的坐标系（默认最近一次 snap/zoom）；`-Screen` 表示坐标是物理屏幕像素；`-Force` 跳过窗口移动检查；`-Settle 毫秒` 动作后最多等多久画面稳定（默认 1000，0=不等）；`-Quiet 毫秒` 动作后这么久画面（整窗 + 点击点周围局部）都没变化就提前返回（默认 250，可用 `CU_SETTLE_QUIET` 改默认）；`-Lang` OCR 语言；`-Size` 列表上限；`-Max` 文本/行数上限；`-UiaForce` 强制重试被记忆为"UIA 不可用"的进程。
 
 动作返回里的关键字段：`changed`/`roi_changed`（画面变化 %）、`settled`（已稳定）、`no_change`（quiet 窗口内毫无变化，多半没生效）、`method`（`uia` 直调成功 / `uia-pending` 结果不确定-看帧勿重复点 / `coord` 坐标点击）、`in_client`（点是否在客户区）、`fg_auto`（自动前台）、`hint`（失败原因与下一步建议）、`hit_box`/`alts`（`-Find`/`-Name` 的命中框与其它候选）、`verify.contains`（读回核对）、`after`（`-Snap` 的新帧）。
+web 层专有：`wall`（**落到了验证/风控/登录页而不是真实内容**：`cloudflare`=人机验证、`risk`=站点风控页、`login`=登录墙；`open`/`info`/`els`/`text` 的成功回复和 `find`/`click`/`wait` 的失败回复都会带上它 + `hint`）、`verified`（点击后该点是否仍命中目标）、`gone`（元素已从文档消失 = 多半是跳转，属于成功）、`retried`（布局移动时补点过一次）、`enterVia`（`-Enter` 实际走了哪条路）。
 
 别名：`dbl`=`double`、`rclick`/`mclick`=`click`（右/中键）；web 子命令 `go`/`nav`=`open`、`locate`=`find`、`txt`=`text`、`value`=`val`、`elements`=`els`、`forward`=`fwd`；`type -Method paste` 等于 `-Method clip`。
 
@@ -142,8 +143,8 @@ $CU web stop                                     # 用完关掉整个实例
 - **定位优先级**：`-Id`（els/shot -Marks 编号，最准）≈ `-Sel`（CSS）> `-Text`（按字，含 aria-label/title/placeholder/label/alt）> 截图坐标（canvas/地图/验证码才用）。`-Text` 命中多个时按「整段相等 > 前缀 > 包含、可交互元素优先、刚填过字的表单同组优先、可见优先、面积小优先」排序，`-Index n` 取第 n 个；结果里的 `count`/`alts` 告诉你有没有歧义。
 - **点击返回值**：`method:"mouse"` = 真实鼠标事件已发出；`verified:true` = 派发后该点仍命中目标元素；`verified:false` + `cover` = 页面滚动/动画让点落空（`retried:true` 表示已自动重新定位补点一次；补点仍没命中，或落点后不可重试的情形——遮挡/出屏/静态未命中——返回里都带 `warn` 如实说明，先看帧再继续；元素已消失说明多半是跳转，属于成功）；`method:"js"` + `warn` = 中心点被 `cover` 挡住或浏览器窗口最小化，已改用 DOM click——这时先看一眼 `cover` 是什么，弹窗就先关掉。
 - **点击不会等跳转**：点完链接如需等待，接 `web wait -Ready` / `web wait -Url 子串` / `web wait -Stable`（`web open` 自带等待）。开了新标签会自动跟过去（返回 `newTab`），跑完记得 `web close` 收拾，或 `web tab -Index N` 切回。
-- **回车提交要核对**：`type -Enter` 后用 `wait -Url/-Sel` 确认真的走了；刚 `open` 完的页面脚本可能还没挂好监听（必应偶发），没反应就 `click` 搜索按钮，或 `wait -Stable` 后重试。
-- **专用实例是独立账号环境**：知乎/京东/微博这类要登录或有风控的站会跳登录页或验证页（`open` 返回的 `url`/`title` 能看出来）；它不会、也不该借用你日常浏览器里的登录态。Cloudflare「正在进行安全验证」页通常几秒后自动过，用 `wait -Find 目标文字 -Timeout 15000` 等。
+- **回车提交要核对**：`type -Enter` 自带兜底——实测必应首页刚打开时它的提交脚本还没挂好，回车被吞成换行、查询串里混进 CRLF；工具会检测到（值尾部出现换行）、清掉换行并点表单的提交按钮，返回 `enterVia:"submit-click"`。仍没反应的页面再 `click` 搜索按钮，或 `wait -Stable` 后重试。
+- **专用实例是独立账号环境**：知乎/京东/微博这类要登录或有风控的站会跳登录页或验证页；返回里的 `wall` 字段直接标明（`login`=登录墙、`risk`=站点风控、`cloudflare`=人机验证）并给 `hint`。**看到 `wall` 就停下来上报**，不要换选择器反复试。人机验证有时几秒后自动过（可 `wait -Find 目标文字 -Timeout 10000` 等一次）；等不过去或遇到登录墙，请用户在**专用浏览器窗口里手动过一次**（验证/登录状态留在专用 profile `state\web\<浏览器>`），或换信息源——**不要试图绕过验证**。
 - 返回里的 `ackLate:true` = 浏览器收下了事件但确认迟到（页面正忙/正在跳转），动作已发出，接着 `wait` 即可。
 - `web type` 后 `visible:false` 表示填进了一个不可见的输入框（老站常留着隐藏的表单）——真人不可能在那里输入，改用 `web els` 里列出的那个。
 - Electron 应用内嵌页面**没有** CDP 端口，仍走原来的 `snap/click`（`-Fg`）；浏览器普通窗口（非专用实例）也不在 CDP 覆盖内。

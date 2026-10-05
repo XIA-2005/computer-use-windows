@@ -1,5 +1,14 @@
 # Changelog
 
+## 6.1.0 真实站点复核修正（2026-10-05，专用实例上实测后追加）
+
+- **`type -Enter` 回车兜底**：实测必应首页刚 `open` 时其提交脚本尚未就绪，回车的 `\r` 落进输入框（textarea 型搜索框）而没有提交，查询串还混进 `%0D%0A`。现在检测"值尾部有换行"→ 清掉换行 → 用真实鼠标点表单自己的提交按钮（返回 `enterVia:"submit-click"`，实测 114ms）；表单没有提交控件时只回 `enterNote`、不改动值。本地回归：`page.html` 的 `#lateform`；必应 3/3 复测通过。
+- **拦截页识别（`wall` + `hint`）**：`open`/`info`/`els`/`text` 的成功回复与 `find`/`click`/`wait` 的失败回复现在会标明落在什么页面上——`cloudflare`（人机验证）/`risk`（站点风控）/`login`（登录墙）。实测来源：v2ex（CF 12s+reload+12s 仍未过）、京东（`risk_handler`→`passport...login.aspx`）、知乎（`/signin`，无 password 输入框，靠文案识别）。**只识别上报，不做任何绕过**；`hint` 明确要求停下并请用户在专用窗口手动过一次（凭证留在 profile）。
+- **`info` 新文档回归修复**：站点自己跳转产生的新文档里，`info` 作为首个命令曾报 `ReferenceError: __cu is not defined`（本轮引入的回归，JD 跳登录页时复现）；`info` 改用 `LibEval`（自动注入页内助手）。本地回归：跨文档点击后立刻 `info`。
+- **点击跳转不再误报 warn**：`web click` 命中会跳转的链接后元素消失，旧实现回"请核对结果"警告；现在返回 `gone:true`、不告警（JD/维基/GitHub 实测），与文档"元素消失多半是跳转"一致。
+- **回归套件**：`bench.ps1` 新增 7 项本地场景（回车兜底、无 CRLF 校验、挑战页/登录页的 `wall` 断言、跨文档 `info`）；新增 `challenge.html`、`login.html`；`sites.ps1` 修 JD 搜索框选择器（`#key` 已消失，改 `input[type=text]`）、zhihu/v2ex 按 `wall` 判定预期结果（新增 `-WantErr`）、新增 `wiki`/`mdn` 两个读文档场景。
+- `web-lib.js` VERSION 20→21：页内助手是"每文档安装一次 + 版本号守卫"，**改内容必须升版本**，否则已打开的标签仍跑旧助手。
+
 ## 6.1.0 实现复核修正（2026-10-05，独立审计后追加）
 
 - **UIA 直调的线程治理与结果三态**：`Act` 与 `Collect` 共用僵尸判龄/线程计数（此前每次超时的直调会静默泄漏一个 UIA 线程）；直调结果不确定（超时/占用）时返回 `method:"uia-pending"` + `warn`，**不再**补发坐标点击（此前可能在 UIA 稍后生效后造成双触发）；实时判定控件已禁用同样报 `ERR_DISABLED`（此前缓存显示"启用"而实际禁用时会回退坐标盲点）；`-Method uia` 为强制语义（失败报 `ERR_UIA_ACT_FAILED`，不静默回退），`auto`/`coord` 行为不变。

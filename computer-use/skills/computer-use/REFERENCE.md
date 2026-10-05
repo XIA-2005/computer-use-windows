@@ -26,6 +26,34 @@
 
 web 层同机复测（`web\bench\bench.ps1 -N 5`）与 v6 基线逐项一致（差异均在噪声内）：`frame` 50ms、`web info` 52ms、`web text` 62ms、`open` 106ms、`click -Text` 76ms、`type -Verify` 64ms、`wait -Sel` 371ms、`shot` 视口 177ms / 整页 133ms、`els` 57ms、`hover` 62ms、`shot -Marks` 152ms。`web click` 新增事后校验（`verified`）约 +5–10ms。
 
+## 真实站点复核（2026-10-05，v6.1）
+
+在专用 Edge 实例上跑 `web\bench\sites.ps1`（只读导航/搜索，结果可复现）：
+
+| 站点 | 结果 | 说明 |
+|---|---|---|
+| GitHub 仓库页 | ✓ 全通 | `open` 5.6s（网络）、`els` 79 个元素 21ms、`click Issues` 真实鼠标 + `wait -Url /issues` 538ms、`/` 快捷键 + `val` 读回 |
+| Bing 首页 | ✓ 搜索全通 | `type -Enter` 3/3 提交成功、查询串无 CRLF（见下"回车兜底"） |
+| 豆瓣搜索 | ✓ | `type` + `click 搜索` + `wait` → 结果页 `title=搜索: 三体` |
+| B 站首页 | ✓ | `els` 75 个元素 28ms、`click 热门`（自动跟到新标签）、`wait -Url popular` 202ms、`shot -Marks` 19 个编号 |
+| 网易云音乐 | ✓ | `els` 220 个元素（穿透同源 iframe）、`click 排行榜`、`find 飙升榜` |
+| 英文维基百科 | ✓ | 文章 134492 字符：`els -Sel #mw-content-text` 到 300 上限、`find References` count=20、锚点 `click verified:true`、`text -Max 5000` → `truncated:true` |
+| MDN 文档页 | ✓ | `els -Sel #content` 57 个元素 6ms、`find Syntax`、`text -Sel #content` 2713 字符 |
+
+拦截页（`wall` 字段的实测来源，**只识别上报、不绕过**）：
+
+| 站点 | wall | 实测 |
+|---|---|---|
+| v2ex | `cloudflare` | 12s 等待 + reload + 12s `wait -Find` 仍未过（旧文档"几秒后自动过"对本例不成立）→ 正确做法是停下、请用户在专用窗口过检一次 |
+| 京东 | `risk` → `login` | 点"搜索"后落 `cfe.m.jd.com/.../risk_handler/`（`wall=risk`），继续跳 `passport.jd.com/.../login.aspx`（`wall=login`） |
+| 知乎 | `login` | `open` 直接落 `/signin?next=%2F`；该页**没有** `input[type=password]`（默认短信验证码登录），靠"密码/验证码登录/忘记密码"文案识别 |
+
+本轮顺带发现并修掉的真问题：
+
+1. **必应吞回车**（`type -Enter`）：首页刚 `open` 时它的提交脚本还没就绪，回车的 `\r` 落进输入框（textarea）、没有提交，查询串里混进 `%0D%0A`。现在会检测"值尾部有换行"、清掉换行、用真实鼠标点表单的提交按钮（`enterVia:"submit-click"`，实测 114ms）；表单没有提交控件时只给 `enterNote`、不改动值。本地回归场景：`web\bench\page.html` 的 `#lateform`（textarea + 提交按钮、无 keydown 处理器）。
+2. **`info` 在"站点自己跳转后的新文档"里首个命令报 `ReferenceError: __cu is not defined`**（本轮自引入的回归，在 JD 跳 passport 后复现）：`info` 改用 `LibEval`（自动注入页内助手）。本地回归：点击跨文档链接后立刻 `info`。
+3. **点击跳转链被误报 warn**：`web click` 命中跳转链接后元素消失，旧实现回"请核对结果"的警告；现在返回 `gone:true`、不告警（JD/维基/GitHub 实测）。
+
 ## web 层实测（2026-09-26）
 
 真实站点（Edge 与 Chrome 专用实例各跑一遍 `web\bench\sites.ps1`）：
