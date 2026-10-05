@@ -39,9 +39,17 @@
  <p>Contenteditable: <div id="editor" contenteditable="true"></div></p>
  <p><button id="lateBtn" onclick="setTimeout(function(){var e=document.createElement('div');e.id='late';e.textContent='延迟出现的元素';document.getElementById('lateHost').appendChild(e)},350)">300ms 后出现</button> <span id="lateHost"></span></p>
  <p><a id="nav" href="#navigated" onclick="log('nav click')">跳转链接</a></p>
+ <p><a id="crossdoc" href="challenge.html">去挑战页</a></p>
 </div>
 <div class="pad">long page filler</div>
 <div class="card"><button id="bottom" onclick="log('bottom click')">页面底部按钮</button></div>
+<!-- Enter-swallow scenario (mirrors Bing measured 2026-10-05): a textarea search box inside a form with a submit
+     button and NO keydown handler - the Enter keydown text lands in the value and nothing is submitted, so cu
+     must detect it, strip the stray CRLF and click the submit button instead. -->
+<form id="lateform" action="#lateform" method="get">
+ <textarea id="lateq" name="lateq" rows="1" style="width:220px"></textarea>
+ <input type="submit" id="latego" value="迟到提交">
+</form>
 <div id="log"></div>
 <script>
  function log(m){var l=document.getElementById('log');l.textContent+=m+'\n';window.__last=m;}

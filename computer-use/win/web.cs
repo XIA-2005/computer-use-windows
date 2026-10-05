@@ -477,6 +477,43 @@ namespace CU
             return J.Err(code, msg);
         }
 
+        // ---------------------------------------------------------------- bot-check / risk pages
+        // Reported, never bypassed: an agent that keeps retrying a challenge page only burns its budget. The
+        // tag goes into error replies and into els/text/open results so the caller can stop and ask the user.
+        const string WallHint =
+            "this page is a bot-check / risk-control page, not the real content: stop retrying - ask the user to pass the check once in the dedicated browser window (the clearance cookie is kept in state\\web\\<browser>), or use the user's own browser";
+        const string LoginHint =
+            "this is the site's sign-in page: the dedicated profile has no login for this site - ask the user whether to log in once in the dedicated browser window (the cookie stays in state\\web\\<browser>) or to use another source";
+        static string WallHintFor(string w) { return w == "login" ? LoginHint : WallHint; }
+        static string WallTag(string b)
+        {
+            Dictionary<string, object> d;
+            if (LibEval(b, "(()=>({ok:true,wall:String(__cu.wall()||'')}))()", 2500, out d) != null) return null;
+            string w = SN(d, "wall");
+            return string.IsNullOrEmpty(w) ? null : w;
+        }
+        static string InjectJson(string json, string frag)
+        {
+            if (string.IsNullOrEmpty(json) || json[json.Length - 1] != '}') return json;
+            return json.Substring(0, json.Length - 1) + "," + frag + "}";
+        }
+        // decorate an error reply with the wall tag when the current page is a challenge page
+        static string WithWall(string b, string errJson)
+        {
+            if (string.IsNullOrEmpty(errJson)) return errJson;
+            string w = WallTag(b);
+            if (w == null) return errJson;
+            return InjectJson(errJson, "\"wall\":" + J.Q(w) + ",\"hint\":" + J.Q(WallHintFor(w)));
+        }
+        static void AddWall(string b, Dictionary<string, object> d)
+        {
+            if (d == null) return;
+            string w = WallTag(b);
+            if (w == null) return;
+            d["wall"] = w;
+            if (!d.ContainsKey("hint")) d["hint"] = WallHintFor(w);
+        }
+
         // ---------------------------------------------------------------- launch / stop / status
         public static string Start(string b, string url)
         {
@@ -691,6 +728,8 @@ namespace CU
               .Append(",\"ready\":").Append(J.Q(readyState));
             if (readyState == "interactive") sb.Append(",\"warn\":\"DOM is ready but the load event has not fired yet (slow resources); the page is usable\"");
             if (!string.IsNullOrEmpty(extra)) sb.Append(',').Append(extra);
+            string w = WallTag(b);
+            if (w != null) sb.Append(",\"wall\":").Append(J.Q(w)).Append(",\"hint\":").Append(J.Q(WallHintFor(w)));
             sb.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append('}');
             return sb.ToString();
         }
@@ -1014,6 +1053,30 @@ namespace CU
             return null;
         }
 
+        // After "-Enter", verify the key actually went somewhere: measured on Bing (its search box is a textarea
+        // whose submit handler is not attached for the first moments after load) the keydown text lands in the
+        // value - the query keeps a stray CRLF and nothing is submitted. When that is detected, drop the newline
+        // and press the form's own submit button with a real mouse click: exactly the workaround SKILL.md used to
+        // document by hand. Forms without a submit control are left untouched (only a note, no extra events).
+        static void VerifyEnter(string b, Dictionary<string, object> d)
+        {
+            Dictionary<string, object> de;
+            if (LibEval(b, "(()=>({ok:true,swallowed:__cu.enterSwallowed()}))()", 2500, out de) != null) return;
+            if (!BN(de.ContainsKey("swallowed") ? de["swallowed"] : null)) return;
+            Dictionary<string, object> df;
+            if (LibEval(b, "(()=>{var p=__cu.enterFallback();return{ok:true,p:p};})()", 3000, out df) != null) return;
+            Dictionary<string, object> p = df.ContainsKey("p") ? df["p"] as Dictionary<string, object> : null;
+            if (p == null || !BN(p.ContainsKey("ok") ? p["ok"] : null))
+            {
+                d["enterNote"] = "the Enter text landed in the field and no submit control was found on its form - if the page needs an explicit submit, click its search/send button";
+                return;
+            }
+            string me = DispatchMouse(b, DN(p, "x"), DN(p, "y"), "left", false);
+            if (me != null) return;
+            d["enterVia"] = "submit-click";
+            d["enterFallback"] = SN(p, "tag") + (SN(p, "id") != "" ? "#" + SN(p, "id") : "");
+        }
+
         // ---------------------------------------------------------------- find / click / hover / scroll
         public static string Find(string b, string sel, string text, int index, bool exact, int id)
         {
@@ -1022,7 +1085,7 @@ namespace CU
             Stopwatch sw = Stopwatch.StartNew();
             Dictionary<string, object> d;
             string er = LibEval(b, LocateExpr(LocQ(sel, text, index, exact, id, false), "d.method='locate';", false), 6000, out d);
-            if (er != null) return er;
+            if (er != null) return WithWall(b, er);
             d["ms"] = sw.ElapsedMilliseconds;
             return _ser.Serialize(d);
         }
@@ -1044,7 +1107,7 @@ namespace CU
             Dictionary<string, object> d;
             string action = js ? "try{el.click();d.method='js';}catch(e){return{ok:false,err:'ERR_CLICK',msg:String(e.message)}}" : "";
             string er = LibEval(b, LocateExpr(LocQ(sel, text, index, exact, id, false), action, true), 6000, out d);
-            if (er != null) return er;
+            if (er != null) return WithWall(b, er);
             if (!js)
             {
                 bool hit = BN(d.ContainsKey("hit") ? d["hit"] : null);
@@ -1149,18 +1212,22 @@ namespace CU
             d["verified"] = hit;
             if (!hit && v3.ContainsKey("cover")) d["cover"] = v3["cover"];
             if (hit) return;
+            // the element left the document: a navigation (or a removal) right after the click - that is the
+            // click WORKING (measured: clicking a link that navigates used to come back with a scary warn)
+            if (!present) { d["gone"] = true; return; }
             // a layout shift moved the element after we located it: one single retry is safe. A merely covered
             // point is NOT retried - the second click would land on whatever covers it (often a just-opened modal).
-            bool retryable = present && moved && !off && method == "auto" && !dbl && button == "left";
+            bool retryable = moved && !off && method == "auto" && !dbl && button == "left";
             if (retryable)
             {
+                bool ran = false;
                 Dictionary<string, object> d4;
                 if (LibEval(b, LocateExpr(LocQ(sel, text, index, exact, id, false), "", true), 6000, out d4) == null &&
                     BN(d4.ContainsKey("hit") ? d4["hit"] : null) && Frames(d4))
                 {
                     string me = DispatchMouse(b, DN(d4, "x"), DN(d4, "y"), button, false);
                     if (me != null) return;
-                    d["retried"] = true;
+                    d["retried"] = true; ran = true;
                     Dictionary<string, object> d5;
                     if (LibEval(b, "({ok:true,v:__cu.check(__cu.last)})", 2500, out d5) == null)
                     {
@@ -1169,7 +1236,9 @@ namespace CU
                     }
                 }
                 if (!BN(d["verified"]))
-                    d["warn"] = "click did not land on the target even after one re-locate + retry: the point is covered or the page keeps moving - verify the result before continuing";
+                    d["warn"] = ran
+                        ? "click did not land on the target even after one re-locate + retry: the point is covered or the page keeps moving - verify the result before continuing"
+                        : "click point does not hit the target and the element could not be re-located: verify the result before continuing";
                 return;
             }
             d["warn"] = "click point no longer hits the target element (verified=false; not retried - covered, off-screen, or a static miss): verify the result before continuing";
@@ -1380,6 +1449,7 @@ namespace CU
                 string ke = EnterKey(b);
                 if (ke != null) return ke;
                 d["enter"] = true;
+                VerifyEnter(b, d);   // Bing-style swallowed Enter -> clean the value + click the form's submit button
             }
             d["ms"] = sw.ElapsedMilliseconds;
             return _ser.Serialize(d);
@@ -1577,8 +1647,9 @@ namespace CU
                 if (sw.ElapsedMilliseconds > 1000) break;
                 Thread.Sleep(100);
             }
-            if (er != null) return er;
-            if (oe != null) return oe;
+            if (er != null) return WithWall(b, er);
+            if (oe != null) return WithWall(b, oe);
+            AddWall(b, d);
             return _ser.Serialize(d);
         }
 
@@ -1599,13 +1670,17 @@ namespace CU
         {
             b = Norm(b);
             if (b == "") return J.Err("ERR_ARGS", "-Browser must be edge or chrome");
-            Dictionary<string, object> d; string unused;
-            string er = EvalObj(b, "(()=>({ok:true,url:String(location.href),title:String(document.title)," +
+            // LibEval (not EvalObj): the wall check needs __cu, and after a site-initiated redirect this may be
+            // the FIRST command in the new document - the lib is auto-injected here
+            Dictionary<string, object> d;
+            string er = LibEval(b, "(()=>({ok:true,url:String(location.href),title:String(document.title)," +
                 "ready:document.readyState==='complete',w:innerWidth,h:innerHeight,dpr:devicePixelRatio," +
-                "x:Math.round(scrollX),y:Math.round(scrollY),dh:Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0)}))()", 4000, out d, out unused);
+                "x:Math.round(scrollX),y:Math.round(scrollY),wall:String(__cu.wall()||'')," +
+                "dh:Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0)}))()", 4000, out d);
             if (er != null) return er;
-            string oe = ObjErr(d);
-            if (oe != null) return oe;
+            string w = SN(d, "wall");
+            d.Remove("wall");
+            if (w != "") { d["wall"] = w; if (!d.ContainsKey("hint")) d["hint"] = WallHintFor(w); }   // info: orient before acting
             return _ser.Serialize(d);
         }
 
@@ -1643,8 +1718,9 @@ namespace CU
             string er = LibEval(b, "(function(){var l=__cu.collect(" + J.Q(sel ?? "") + "," + (all ? "true" : "false") + "," + max + ",false);" +
                 "if(!l)return{ok:false,err:'ERR_NOT_FOUND',msg:'scope selector not found: '+" + J.Q(sel ?? "") + "};" +
                 "return{ok:true,count:l.length,url:String(location.href),elements:l};})()", 8000, out d);
-            if (er != null) return er;
+            if (er != null) return WithWall(b, er);
             d["ms"] = sw.ElapsedMilliseconds;
+            AddWall(b, d);        // a challenge page has almost no elements: say why instead of "count 2"
             return _ser.Serialize(d);
         }
 
@@ -1670,7 +1746,7 @@ namespace CU
             while (true)
             {
                 int left = timeoutMs - (int)sw.ElapsedMilliseconds;
-                if (left <= 0) return J.Err("ERR_TIMEOUT", "condition not met within " + timeoutMs + "ms");
+                if (left <= 0) return WithWall(b, J.Err("ERR_TIMEOUT", "condition not met within " + timeoutMs + "ms"));
                 // a navigation destroys the document our waiter lives in and its promise never settles; keep the
                 // slices short when a navigation is what we are waiting for (-Url / -Ready) so that costs little
                 int slice = Math.Min(left, (!string.IsNullOrEmpty(urlSub) || ready) ? 600 : 2500);
@@ -1690,7 +1766,7 @@ namespace CU
                 // transient errors during navigation (context destroyed / session gone) are retried
                 if (ej != null && !ej.Contains("ERR_CDP") && !ej.Contains("ERR_WS") && !ej.Contains("ERR_TIMEOUT") && !ej.Contains("ERR_JS"))
                     return ej;
-                if (++transient > 200) return ej ?? J.Err("ERR_TIMEOUT", "wait gave up");
+                if (++transient > 200) return WithWall(b, ej ?? J.Err("ERR_TIMEOUT", "wait gave up"));
                 Thread.Sleep(35);
             }
         }

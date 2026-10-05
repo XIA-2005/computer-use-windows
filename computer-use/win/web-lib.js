@@ -2,7 +2,7 @@
    Installs window.__cu once per document (versioned). Plain ES5 so it also runs in old embedded pages.
    It is embedded as a JSON string by web.cs, so any quoting style is fine. */
 (function () {
-  var VERSION = 19;
+  var VERSION = 21;
   if (window.__cu && window.__cu.v === VERSION) return;
   var cu = { v: VERSION, els: null, last: null, lastInput: null };
   var norm = function (t) { return String(t == null ? '' : t).replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim(); };
@@ -287,6 +287,46 @@
   cu.readValue = function (el) {
     if (el.value !== undefined && el.value !== null && cu.tag(el) !== 'div') return String(el.value);
     return String(el.isContentEditable ? (el.innerText || el.textContent) : (el.value !== undefined ? el.value : (el.innerText || el.textContent || '')));
+  };
+  // ---- bot-check / risk-control page detection (report only; never attempt to defeat the check) ----------
+  cu.wall = function () {
+    try {
+      var t = String(document.title || ''), h = String(location.href || '');
+      var b = document.body ? String(document.body.innerText || '').slice(0, 600) : '';
+      // content signals first: a real interstitial says so in its title/body/DOM
+      if (document.querySelector('#challenge-form,#cf-chl-widget,.cf-turnstile,form[action*="challenge"],#captcha-form,input[name="captcha"],iframe[src*="challenges.cloudflare.com"]')) return 'cloudflare';
+      if (/请稍候|Just a moment|Attention Required|安全验证|Verify you are human|Checking your browser|Are you a robot|人机验证|机器人验证/i.test(t)) return 'cloudflare';
+      if (/正在进行安全验证|Verify you are human|Checking your browser|cf-error-details|人机验证|安全验证|机器人/i.test(b)) return 'cloudflare';
+      // URL only as a last resort, limited to unmistakable risk-control endpoints
+      if (/risk_handler|\/captcha|\/verify_?human|captcha\.|challenges\.cloudflare\.com/i.test(h)) return 'risk';
+      // login wall: a sign-in endpoint plus either a password field or unmistakable sign-in wording (zhihu's
+      // sign-in page has no password input by default - it opens on SMS-code login, so the text is the signal)
+      if (/(^|[\/.])(login|signin|sign-?in|logon|passport)([\/.?&=#]|$)/i.test(h)) {
+        if (document.querySelector('input[type=password]')) return 'login';
+        if (/(密码|验证码|扫码登录|忘记密码|sign in|sign-in|log ?in|forgot password)/i.test(b)) return 'login';
+      }
+      return '';
+    } catch (e) { return ''; }
+  };
+  // ---- Enter helpers ------------------------------------------------------------------------------------
+  // An Enter keydown carries text "\r"; when the page's submit handler is not attached yet (or the box is a
+  // textarea) the character lands in the value and nothing is submitted. Detect exactly that, drop the stray
+  // newline from the input and hand back a click point on the form's own submit button (what a person would do).
+  cu.enterSwallowed = function () {
+    var el = cu.last; if (!el) return false;
+    return /[\r\n]$/.test(cu.readValue(el));
+  };
+  cu.enterFallback = function () {
+    var el = cu.last; if (!el) return { ok: false, err: 'ERR_STALE' };
+    var f = el.form || (el.closest ? el.closest('form') : null);
+    var b = f ? f.querySelector('input[type=submit],button[type=submit],input[type=image]') : null;
+    if (!b) return { ok: false, reason: 'no-submit-control' };   // no form/submit: leave the value untouched
+    var v = cu.readValue(el);
+    if (/[\r\n]$/.test(v)) cu.setValue(el, v.replace(/[\r\n]+$/, ''), false);   // strip on the INPUT, before cu.last moves
+    cu.last = b;
+    var p = cu.point(b);
+    p.ok = true; p.tag = cu.tag(b); p.id = String(b.id || '');
+    return p;
   };
   // prepare an element for typing: focus, optionally select everything (so Input.insertText replaces)
   cu.focusFor = function (el, selectAll) {

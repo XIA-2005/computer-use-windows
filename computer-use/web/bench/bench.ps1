@@ -7,6 +7,8 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent (Split-Path -Parent $here)
 $cu = Join-Path $root 'win\cu.exe'
 $page = 'file:///' + ((Join-Path $here 'page.html') -replace '\\', '/')
+$challenge = 'file:///' + ((Join-Path $here 'challenge.html') -replace '\\', '/')
+$login = 'file:///' + ((Join-Path $here 'login.html') -replace '\\', '/')
 $results = New-Object System.Collections.ArrayList
 function Run([string]$label, [string[]]$argv, [int]$n = $N, [scriptblock]$check = $null) {
   $times = @(); $last = $null; $okc = 0
@@ -58,4 +60,22 @@ Run 'scroll -Text (into view)' @('web', 'scroll', '-Browser', $Browser, '-Text',
 Run 'shot -Marks' @('web', 'shot', '-Browser', $Browser, '-Marks', '-Out', (Join-Path $root 'state\bench-marks.jpg')) 2 { param($j) 'marks=' + $j.marks + ' w=' + $j.w + ' h=' + $j.h }
 Run 'wait -Stable' @('web', 'wait', '-Browser', $Browser, '-Stable', '-Timeout', '4000') 1
 Run 'click -Text covered (overlay)' @('web', 'click', '-Browser', $Browser, '-Text', 'cu web bench page', '-Exact') 1 { param($j) 'method=' + $j.method + ' hit=' + $j.hit + ' warn=' + $j.warn }
+# Enter robustness: a textarea form whose Enter is not handled (measured on Bing) must not lose the query.
+# Expected: cu detects the swallowed Enter, strips the CRLF and clicks the form's submit button.
+Run 'type -Enter swallowed -> submit-click' @('web', 'type', '-Browser', $Browser, '-Sel', '#lateq', '-Text', 'enter fallback', '-Enter') 1 { param($j) 'enterVia=' + $j.enterVia + ' via=' + $j.enterFallback + ' note=' + $j.enterNote + ' warn=' + $j.warn }
+Run 'wait url lateq (submitted)' @('web', 'wait', '-Browser', $Browser, '-Url', 'lateq=', '-Timeout', '6000') 1
+Run 'info after submit (no stray CRLF)' @('web', 'info', '-Browser', $Browser) 1 { param($j) if (("$($j.url)" -like '*lateq=enter*') -and ("$($j.url)" -notlike '*%0D*') -and ("$($j.url)" -notlike '*%0A*')) { 'url ok: ' + ($j.url -replace '^.*lateq=', 'lateq=') } else { 'BAD url=' + $j.url } }
+# Wall detection: a local Cloudflare-like interstitial must be reported, never treated as real content.
+Run 'open challenge page (wall tag)' @('web', 'open', '-Browser', $Browser, '-Url', $challenge) 1 { param($j) 'wall=' + $j.wall }
+Run 'els on challenge (wall tag)' @('web', 'els', '-Browser', $Browser) 1 { param($j) 'count=' + $j.count + ' wall=' + $j.wall }
+Run 'find on challenge (wall tag)' @('web', 'find', '-Browser', $Browser, '-Text', '正在安全验证不存在') 1 { param($j) 'expected error: err=' + $j.err + ' wall=' + $j.wall }
+Run 'text on challenge (wall tag)' @('web', 'text', '-Browser', $Browser) 1 { param($j) 'wall=' + $j.wall + ' len=' + $j.len }
+# Login wall: a sign-in URL with a password field must be tagged so the agent stops instead of guessing selectors.
+Run 'open login page (wall=login)' @('web', 'open', '-Browser', $Browser, '-Url', $login) 1 { param($j) 'wall=' + $j.wall }
+Run 'els on login page (wall=login)' @('web', 'els', '-Browser', $Browser) 1 { param($j) 'count=' + $j.count + ' wall=' + $j.wall }
+# A site-initiated cross-document navigation (like JD's redirect to passport.jd.com): the next command runs in a
+# document no cu helper has touched yet - it must auto-inject and work (measured failure: info -> ReferenceError).
+Run 'open page then click cross-doc link' @('web', 'open', '-Browser', $Browser, '-Url', $page) 1
+Run 'click cross-document link' @('web', 'click', '-Browser', $Browser, '-Sel', '#crossdoc') 1 { param($j) 'method=' + $j.method + ' gone=' + $j.gone }
+Run 'info first in new document (lib auto-inject)' @('web', 'info', '-Browser', $Browser) 1 { param($j) 'wall=' + $j.wall + ' url=' + ("$($j.url)" -replace '^.*/', '') }
 $results | Format-Table -AutoSize -Wrap | Out-String -Width 260 | Write-Host

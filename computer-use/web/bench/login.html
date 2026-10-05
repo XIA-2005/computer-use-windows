@@ -1,0 +1,14 @@
+<!doctype html>
+<!-- login.html - local stand-in for a site sign-in wall (URL contains "login" + a password field), so the
+     login detection in web-lib.js (cu.wall -> 'login') can be regression-tested without visiting a real site. -->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>登录 - 示例站点</title></head>
+<body>
+  <h1>请登录</h1>
+  <form action="#login" method="get">
+    <input id="u" name="u" type="text" placeholder="账号">
+    <input id="p" name="p" type="password" placeholder="密码">
+    <button type="submit">登录</button>
+  </form>
+</body>
+</html>
