@@ -1,8 +1,9 @@
 # runtime state: screenshots, frame files, dedicated browser profiles (logins!) - never commit
 state/
 shots/
-# compiled C# cache, rebuilt on first run
-**/win/bin/
+# compiled C# cache; only the source-hash-named DLL is committed (skips the 3-8 s first-run compile)
+**/win/bin/*
+!**/win/bin/cu-*.dll
 # local backups of previous versions
 **/win/_v*_backup/
 *.tmp

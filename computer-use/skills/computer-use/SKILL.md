@@ -1,14 +1,14 @@
 ---
 name: computer-use
-description: 操作 Windows 桌面应用与专用浏览器实例的原语工具包：截图给多模态模型直接看、DPI 精确点击/输入/OCR 找字（cu.exe），附 Chrome DevTools Protocol 浏览器层（DOM 级定位点击，不截图、不动日常浏览器）。当需要在本机自动化 GUI 或浏览器任务、截图验证界面状态、精确点击输入、读取屏幕文字时使用。
+description: 操作 Windows 桌面应用与专用浏览器实例的原语工具包（cu.exe）：截图给多模态模型直接看、DPI 精确点击/输入、OCR 找字（三级匹配 + 多候选）、UI Automation 控件直调，附 Chrome DevTools Protocol 浏览器层（DOM 级定位点击，不截图、不动日常浏览器）。Use when automating Windows GUI or a browser on this machine: screenshots for vision, precise click/type, OCR text location, window and control automation, web page automation. 当需要在本机自动化 GUI 或浏览器任务、截图验证界面状态、精确点击输入、读取屏幕文字时使用。
 ---
 
-# Computer Use Skill — Windows v6（快 + 准 + 浏览器 CDP）
+# Computer Use Skill — Windows v6.1（快 + 准 + 浏览器 CDP）
 
 > **路径基准**：本文件位于分享包 / ZCode 插件的 `skills\computer-use\` 下。下文提到的 `win\`、`web\`、`state\` 一律相对于**分享包 / 插件根**（即本文件所在目录的上两级）；`cu.exe` 的完整相对路径 = 本技能目录的 `..\..\win\cu.exe`。
 
 > 定位：与具体应用无关的 Windows Computer Use 原语。截图交给**原生多模态模型直接看**，模型输出图上坐标，脚本负责把坐标**精确**映射回屏幕并注入。ShunCode 本体零改动。
-> 当前 v6（2026-09-26）：浏览器层 CDP 重做（真实鼠标点击、可信输入、文字定位引擎），桌面层提速（OCR 内存直通与结果复用）。完整版本历史见仓库根 `CHANGELOG.md`，实测数据与 Electron 案例见同目录 `REFERENCE.md`。
+> 当前 v6.1（2026-10-05）：OCR 三级匹配（精确/归一化/模糊）与多候选一次识别、UIA 控件直调点击、动作返回命中框与候选、后台输入提速（全部带可回退开关）。完整版本历史见同目录 `CHANGELOG.md`，实测数据与 Electron 案例见同目录 `REFERENCE.md`。
 
 ## 铁律（不变）
 
@@ -20,14 +20,28 @@ description: 操作 Windows 桌面应用与专用浏览器实例的原语工具�
 ## 调用方式
 
 ```bash
-CU='"<本技能目录>\..\..\win\cu.exe"'      # 推荐：快（<本技能目录> = 本 SKILL.md 所在目录；cu.exe 固定在插件根的 win\ 下；值里嵌双引号是故意的——路径可能含空格）
-$CU <cmd> [参数]        # 每条命令只输出一行 JSON；ok:false 时退出码 1
-# 兼容/兜底：powershell -NoProfile -ExecutionPolicy Bypass -File "<本技能目录>\..\..\win\cu.ps1" <cmd> [参数]
+# Git Bash / ZCode 的 shell（用正斜杠；<技能目录> 替换成本 SKILL.md 所在目录的实际路径，路径含空格时引号必须保留）
+CU="<技能目录>/../../win/cu.exe"
+"$CU" <cmd> [参数]     # 每条命令只输出一行 JSON；ok:false 时退出码 1
+
+# cmd.exe / PowerShell 变体（反斜杠）
+set CU="<技能目录>\..\..\win\cu.exe"
+%CU% <cmd> [参数]
 ```
 
-- `cu.exe` 参数与 `cu.ps1` 完全相同。它把命令交给后台常驻的 `cu.ps1 serve`（命名管道，仅当前用户可连），省掉每次启动 PowerShell + 加载 DLL 的 ~500ms。第一次调用会自动拉起常驻进程（约 1–2 秒），空闲 20 分钟自动退出（`CU_IDLE=分钟`）。改了 `cu.ps1/cu.cs/uia.cs` 会自动换新进程。
-- 常驻进程不可用时自动回退为直接运行 `cu.ps1`；`CU_NODAEMON=1` 强制不用常驻；`cu.exe --stop` 手动停止。
-- 首次运行会用 .NET 自带 csc 把 `cu.cs + uia.cs + web.cs` 编译到 `win/bin/cu-<hash>.dll`，之后直接加载。状态文件默认在 `computer-use/state/`（可用环境变量 `CU_STATE` 改）。
+- `cu.exe` 参数与 `cu.ps1` 完全相同。它把命令交给后台常驻的 `cu.ps1 serve`（命名管道，仅当前用户可连），省掉每次启动 PowerShell + 加载 DLL 的 ~500ms（整条命令多为 45–90ms）。第一次调用会自动拉起常驻进程（约 1–2 秒），空闲 20 分钟自动退出（`CU_IDLE=分钟`）。改了 `cu.ps1/cu.cs/uia.cs/web.cs` 会自动换新进程。
+- 常驻进程不可用时自动回退为直接运行 `cu.ps1`；`CU_NODAEMON=1` 强制不用常驻；`cu.exe --stop` 手动停止（改环境变量后需要它才能生效，见「环境变量」）。
+- 首次运行会用 .NET 自带 csc 把 `cu.cs + uia.cs + web.cs` 编译到 `win/bin/cu-<hash>.dll`（约 3–8 秒，之后不再重复；包内已带预编译 DLL，hash 不匹配才会现场编译）。状态文件默认在 `computer-use/state/`（可用环境变量 `CU_STATE` 改）。
+
+## 选路决策树（先选对路子，再动手）
+
+1. 目标在**专用浏览器**里（或就是要开网页）→ 走 `web` 层：`-Id`（`web els` 编号）≈ `-Sel` > `-Text`（`-TextB64` 同义）> `web shot` 坐标。不截图、不 OCR，45–85ms/条。
+2. 桌面窗口 → 先 `snap -Marks` 看有没有编号：
+   - **有编号**（Win32 / WinForms / WPF / 资源管理器 / UWP / 多数 WinUI）→ `click -Id N`：默认走 **UIA 控件直调**（`method:"uia"`，按控件语义触发，不依赖坐标、不受遮挡影响），失败自动回退坐标点击（`method:"coord"`）；`-Method coord` 可强制坐标。元素被禁用会直接报 `ERR_DISABLED`，不会盲点。
+   - **没编号 + 有文字** → `click -Find "文字"`：OCR 三级匹配（精确 → 归一化（去标点/全角）→ 模糊（易混字符 + 编辑距离≤1）），目标文不确切时用 `"保存|确定|Save"` 一次识别多个候选；返回里 `match` 说明命中级别，`hit_box`/`alts` 给出命中框和其它候选（不用再跑一次 OCR）。
+   - **没编号 + 没文字**（画布/图片/自绘界面）→ 视觉坐标 `-X -Y`。
+3. **Chromium/Electron/Qt 窗口**（QQ、微信新版、VS Code、专用 Edge 等 `Chrome_WidgetWin_*`/`Qt*QWindow*`）：后台消息常被忽略 → 视觉坐标 + `-Find`，动作加 `-Fg`（**需当次许可**）；或设 `CU_FG_AUTO=1` 让这类窗口自动走前台（默认关，见「环境变量」）。后台动作没生效时返回里的 `hint` 会直接说明原因。
+4. 任何一步失败 → 停下上报，不要静默重试或自行切换模式（错误码表在下面）。
 
 ## 命令速查
 
@@ -35,28 +49,30 @@ $CU <cmd> [参数]        # 每条命令只输出一行 JSON；ok:false 时退�
 |---|---|---|
 | `info` | 列可见窗口（hwnd/标题/进程/矩形/DPI/前台）+ 屏幕几何 | `-Title 过滤` `-All` |
 | `snap` | 截窗口（或全屏）→ 图 + **帧文件** | `-Title/-Proc/-Hwnd` `-Out` `-Region x,y,w,h` `-Grid 100` `-MaxSide` `-Method auto/screen/print` `-Restore`；`-Marks`（控件编号图 `cur-marks.jpg` + 列表）/ `-Uia`（只要列表） |
-| `els` | 列出窗口的可交互控件（UIA）：`[编号,类型,名称,cx,cy,w,h]` | `-Text2`（含文本元素）`-UiaTimeout 1500` |
+| `els` | 列出窗口的可交互控件（UIA）：`[编号,类型,名称,cx,cy,w,h]` | `-Text2`（含文本元素）`-UiaTimeout 1500` `-Size 上限`（默认 400） |
 | `zoom` | 以帧图上一点为中心，截**原生分辨率**放大图（自带网格），并成为新的当前帧 | `-X -Y -R 120 -ZoomSize 900` |
-| `click` / `double` / `rclick` / `mclick` | 点击 | `-X -Y`（帧图坐标）/ `-Id N`（marks 编号）/ `-Name 控件名`（UIA，找不到自动转 OCR）/ `-Find 文字`（OCR）；`-Mods ctrl,shift`；`-Fg`；`-Snap`；`-NoSnapTo` |
+| `click` / `double` / `rclick` / `mclick` | 点击 | `-X -Y`（帧图坐标）/ `-Id N`（marks 编号，默认 UIA 直调）/ `-Name 控件名`（UIA，找不到自动转 OCR）/ `-Find 文字`（OCR，支持 `"a|b"`）；`-Method auto\|uia\|coord`；`-Mods ctrl,shift`；`-Fg`；`-FgAuto`/`-BgForce`；`-Snap`；`-NoSnapTo` |
 | `move` / `down` / `up` | 悬停 / 按下 / 抬起 | 同上 |
 | `drag` | 拖拽 | `-X -Y -X2 -Y2` |
 | `scroll` / `hscroll` | 滚轮（负=向下/向左） | `-X -Y -Wheel -3` |
 | `key` | 按键/组合键，空格分隔为序列 | `-Keys "ctrl+a delete"` `-Repeat n` |
-| `type` | 输入文字（可先点击输入框、可回车） | `-Text` / `-TextB64`（UTF-8 base64，中文最稳）/ `-TextFile`；`-X -Y` / `-Id` / `-Name` / `-Find`；`-Enter`；`-Verify`（读回输入框内容核对）；`-Method auto/replacesel/char/clip` |
+| `type` | 输入文字（给 `-X/-Id/-Name/-Find` 时先点击该控件再输入） | `-Text` / `-TextB64`（UTF-8 base64，中文最稳）/ `-TextFile`；`-X -Y` / `-Id` / `-Name` / `-Find`；`-Enter`；`-Verify`（读回核对：标准编辑框用 `WM_GETTEXT` 精确读，`source:"edit"`；其他控件走 UIA）；`-Method auto/replacesel/char/clip` |
 | `mark` | 点前预览：画准星 + 生成 4× 放大核对图 | `-X -Y` 或 `-Pts "x:y,x:y"`；`-Zoom 24`（0=不出放大图） |
-| `find` | OCR 找字，返回帧图坐标（中心 cx,cy）；返回 `pass`（plain/prep 哪一遍命中）和 `cached`（画面未变，复用了上次识别） | `-Find 文字` `-Index n` `-Region x,y,w,h`（只识别帧图的一块，快 3–8 倍） |
-| `ocr` | 全部文字行 + 坐标（帧图坐标） | `-Path 图片`（识别指定图片）；`-Region x,y,w,h`（只识别帧图一块，快）；`-Method auto/screen/print` |
+| `find` | OCR 找字，返回帧图坐标（中心 cx,cy）；`match`=命中级别（exact/norm/fuzzy）、`pass`（plain/prep）、`cached`（画面未变，复用上次识别） | `-Find 文字`（或 `"a\|b\|c"` 多候选、`-FindB64`）`-Index n` `-Strict`（关闭模糊级）`-Region x,y,w,h`（只识别帧图的一块，快 3–8 倍）`-Lang zh-Hans-CN` |
+| `ocr` | 全部文字行 + 坐标（帧图坐标） | `-Path 图片`（识别指定图片）；`-Region x,y,w,h`（只识别帧图一块，快）；`-Method auto/screen/print`；`-Max 行数`（默认 300，超出给 `truncated:true`）；`-Lang` |
 | `wait` | 等文字出现 / 等画面稳定 / 固定等待 | `-Find 文字 -Timeout 8000` / `-Stable` / `-Ms 300` |
 | `activate` | 把目标窗口置前（前台模式前用） | |
 | `frame` | 打印当前帧信息 | |
 | `do` | 一次进程内执行多步（快） | `-Steps '[{"cmd":"click","X":1,"Y":2},...]'` 或 `-StepsFile`；也可混 `{"cmd":"web","Sub":"click",...}` |
 | `web <子命令>` | **浏览器 CDP 层**（见下文「浏览器层」）：点按钮/填表/读字/截图都不走屏幕 | `-Browser edge\|chrome` `-Url` `-Sel` `-Text`/`-TextB64` `-Id` `-Index` `-Exact` `-Js` `-X -Y` `-Wheel` `-NewTab` `-Marks` `-Verify` |
 
-通用：`-Frame <帧文件或图片路径>` 指定用哪张截图的坐标系（默认最近一次 snap/zoom）；`-Screen` 表示坐标是物理屏幕像素；`-Force` 跳过窗口移动检查；`-Settle 毫秒` 动作后最多等多久画面稳定（默认 1000，0=不等）；`-Quiet 毫秒` 动作后这么久画面（整窗 + 点击点周围局部）都没变化就提前返回（默认 400）。
+通用：`-Frame <帧文件或图片路径>` 指定用哪张截图的坐标系（默认最近一次 snap/zoom）；`-Screen` 表示坐标是物理屏幕像素；`-Force` 跳过窗口移动检查；`-Settle 毫秒` 动作后最多等多久画面稳定（默认 1000，0=不等）；`-Quiet 毫秒` 动作后这么久画面（整窗 + 点击点周围局部）都没变化就提前返回（默认 250，可用 `CU_SETTLE_QUIET` 改默认）；`-Lang` OCR 语言；`-Size` 列表上限；`-Max` 文本/行数上限；`-UiaForce` 强制重试被记忆为"UIA 不可用"的进程。
+
+动作返回里的关键字段：`changed`/`roi_changed`（画面变化 %）、`settled`（已稳定）、`no_change`（quiet 窗口内毫无变化，多半没生效）、`method`（uia/coord）、`in_client`（点是否在客户区）、`fg_auto`（自动前台）、`hint`（失败原因与下一步建议）、`verify.contains`（读回核对）、`after`（`-Snap` 的新帧）。
 
 别名：`dbl`=`double`、`rclick`/`mclick`=`click`（右/中键）；web 子命令 `go`/`nav`=`open`、`locate`=`find`、`txt`=`text`、`value`=`val`、`elements`=`els`、`forward`=`fwd`；`type -Method paste` 等于 `-Method clip`。
 
-OCR 语言前提：Windows OCR 只识别「设置 → 时间和语言 → 语言」里已安装的语言（中英混排界面需对应语言包都在）；一个可用语言都没有时 `find`/`ocr` 报 `ERR_NO_OCR`。
+OCR 语言前提：Windows OCR 只识别「设置 → 时间和语言 → 语言」里已安装的语言（中英混排界面需对应语言包都在）；一个可用语言都没有时 `find`/`ocr` 报 `ERR_NO_OCR`。装了多个语言包想指定用哪个：`-Lang zh-Hans-CN`（用错语言返回的 msg 会写明该 tag 没有语言包）。
 
 ## 坐标协议：帧（frame）—— 零换算、DPI 安全
 
@@ -75,17 +91,17 @@ $CU click -X 412 -Y 230 -Snap                   # 2. 点击，等画面稳定后
 $CU type -X 300 -Y 400 -TextB64 5L2g5aW9 -Enter # 3. 点输入框 + 输入 + 回车，一条命令完成
 ```
 
-- **一动一截**：动作加上 `-Snap`（也可 `-Snap -Marks`），返回里的 `after` 就是动作后的新帧，下一步直接用，不用再单独 snap。返回里的 `changed`（画面变化百分比）和 `settled` 可以用来判断：`changed≈0` 说明这次点击多半没生效。
-- **有文字就用文字定位**：按钮/菜单/链接上有字时优先 `click -Find "保存"`（OCR 在原生分辨率上找字，比目测坐标更准），多个匹配用 `-Index`。
-- **连续的确定动作用 `do` 批量执行**（一次进程、零启动开销），最后一步加 `"Snap":true`：
+- **一动一截**：动作加上 `-Snap`（也可 `-Snap -Marks`），返回里的 `after` 就是动作后的新帧，下一步直接用，不用再单独 snap。返回里的 `changed`（画面变化百分比）、`settled`、`no_change` 用来判断：`no_change:true`（quiet 窗口内毫无变化，默认 250ms）说明这次点击多半没生效，同时会带 `hint` 说明原因（非客户区 / Chromium 忽略后台输入 / 慢应用可加 `-Quiet 600` 再看）。
+- **有文字就用文字定位**：按钮/菜单/链接上有字时优先 `click -Find "保存"`（OCR 在原生分辨率上找字，比目测坐标更准），文不确切时用 `click -Find "保存|确定|Save"` 一次试多个候选；返回的 `match`（exact/norm/fuzzy）告诉你命中的是哪种级别，`alts` 是其它候选。
+- **连续的确定动作用 `do` 批量执行**（一次进程、零启动开销；批内默认为不等待画面 `Settle=0`），最后一步加 `"Snap":true`：
   ```bash
   $CU do -Title "记事本" -Steps '[{"cmd":"key","Keys":"ctrl+a"},{"cmd":"type","Text":"hello"},{"cmd":"key","Keys":"ctrl+s","Snap":true}]'
   ```
-- 等待加载用 `wait -Find "完成"` 或 `wait -Stable`，**不要**用固定 sleep 盲等。
+- 等待加载用 `wait -Find "完成"`（同样支持 `"a|b"`）或 `wait -Stable`，**不要**用固定 sleep 盲等。
 
 ## 浏览器层（CDP）—— 操控浏览器最快最准的方式（v6）
 
-Chrome/Edge 内置调试协议（DevTools Protocol）。`web` 系列命令直接在页面里定位元素，用 CDP 注入**可信的鼠标/键盘事件**（浏览器把它们当成真人输入：pointerdown/mousedown/hover 全有，但不动系统光标、不抢焦点）：**不截图、不 OCR**，单步内部耗时 2–30ms，含 `cu.exe` 管道开销整条命令 45–85ms（屏幕路径对应要 600–1200ms）。页内助手在 `win\web-lib.js`（改它立即生效，不用重启常驻进程）。
+Chrome/Edge 内置调试协议（DevTools Protocol）。`web` 系列命令直接在页面里定位元素，用 CDP 注入**可信的鼠标/键盘事件**（浏览器把它们当成真人输入：pointerdown/mousedown/hover 全有，但不动系统光标、不抢焦点）：**不截图、不 OCR**，单步内部耗时 2–30ms，含 `cu.exe` 管道开销整条命令 45–90ms（桌面层对照：`snap` ~150ms、`find` 一次全屏 OCR ~0.2–1.5s（取决于窗口大小）、命中缓存后 ~50ms）。页内助手在 `win\web-lib.js`（改它立即生效，不用重启常驻进程）。
 
 - **专用独立实例**：独立用户目录 `state\web\{edge|chrome}`（登录过的网站会保持登录），调试端口只监听 `127.0.0.1`（edge=9462，chrome=9461）。**永远不会附着到你日常开的浏览器窗口**；启动带 `--disable-sync`，不会被账号同步污染。
 - 其它 `web` 命令发现浏览器没开时会自动拉起；当前标签页会记住（常驻进程重启不丢）。`-Browser chrome` 切换浏览器（默认 edge）。
@@ -101,7 +117,7 @@ Chrome/Edge 内置调试协议（DevTools Protocol）。`web` 系列命令直接
 | `web scroll` | 滚动：把元素滚到视口中央 / 滚轮 / 像素 | `-Sel/-Text/-Id`（滚到元素）；`-Wheel -5`（负=向下，每格 100px）；`-Y 600 -X 0`（scrollBy） |
 | `web type` | 填表：默认**可信输入**（聚焦 → 全选 → `Input.insertText`，浏览器按真人打字处理：beforeinput/input、联想、Enter 提交都正常）；`<select>`、不可见目标、超长文本走原生 setter + `InputEvent` | `-Sel`/`-Id`（省略=当前焦点元素，无焦点报错不乱打；目标不可见会给 `warn`）；`-Text/-TextB64/-TextFile`；`-Append`（光标移到末尾再输）；`-Enter`；`-Verify` 读回核对；`-Method value` 强制 setter（最快，但有些站的回车不认）/ `-Method keys` 强制可信输入；`<select>` 按 value / 显示文字 / 包含匹配；清空用 `web keys -Sel X -Keys "ctrl+a delete"` |
 | `web keys` | 页面按键/组合键 | `-Keys "ctrl+s"`、`"enter"`、`"tab"`、`"ctrl+a delete"`（空格分隔序列；ctrl+a/c/v/x/z 带编辑命令，任何输入框都生效）；`-Sel/-Id` 先聚焦到目标；中文走 insertText |
-| `web text` | 读页面/元素文字（返回里带 url、title） | `-Sel`（默认 body；超长自动截断10万字符） |
+| `web text` | 读页面/元素文字（返回里带 url、title、`chars`/`len`/`truncated`） | `-Sel`（默认 body；默认取前 20000 字符，长页面加 `-Max 100000` 或分段读） |
 | `web val` | 读输入框/富文本当前值 | `-Sel`/`-Id`（默认焦点元素） |
 | `web eval -Js` | 执行任意 JS，返回值自动 JSON 化（页内可直接用 `__cu.*` 助手） | `-Timeout 10000` |
 | `web shot` | 截**视口**图（浏览器直接按比例输出，默认最长边 1568、JPEG） | `-Out` `-Full`（整页）`-Marks`（**给可见的可交互元素画编号框**，返回 `elements` 列表，之后 `click -Id N`）`-Quality 85` `-MaxSide`；返回 `scale`（图像px→CSSpx）、`dpr`、`sx/sy`；之后可用 `web click -X -Y`（页面滚动了也会按帧记录的位置换算） |
@@ -124,7 +140,7 @@ $CU web stop                                     # 用完关掉整个实例
 ```
 
 - **定位优先级**：`-Id`（els/shot -Marks 编号，最准）≈ `-Sel`（CSS）> `-Text`（按字，含 aria-label/title/placeholder/label/alt）> 截图坐标（canvas/地图/验证码才用）。`-Text` 命中多个时按「整段相等 > 前缀 > 包含、可交互元素优先、刚填过字的表单同组优先、可见优先、面积小优先」排序，`-Index n` 取第 n 个；结果里的 `count`/`alts` 告诉你有没有歧义。
-- **点击返回值**：`method:"mouse"` = 真实鼠标事件已发出；`hit:false` + `warn` = 中心点被别的元素挡住（遮罩/悬浮条/弹窗），已改用 DOM click——这时先看一眼 `cover` 是什么，弹窗就先关掉；`frames:false` = 浏览器窗口被最小化/隐藏，鼠标事件会卡住，已自动改用 DOM click。
+- **点击返回值**：`method:"mouse"` = 真实鼠标事件已发出；`verified:true` = 派发后该点仍命中目标元素；`verified:false` + `cover` = 页面滚动/动画让点落空（`retried:true` 表示已自动重新定位补点一次；元素已消失说明多半是跳转，属于成功）；`method:"js"` + `warn` = 中心点被 `cover` 挡住或浏览器窗口最小化，已改用 DOM click——这时先看一眼 `cover` 是什么，弹窗就先关掉。
 - **点击不会等跳转**：点完链接如需等待，接 `web wait -Ready` / `web wait -Url 子串` / `web wait -Stable`（`web open` 自带等待）。开了新标签会自动跟过去（返回 `newTab`），跑完记得 `web close` 收拾，或 `web tab -Index N` 切回。
 - **回车提交要核对**：`type -Enter` 后用 `wait -Url/-Sel` 确认真的走了；刚 `open` 完的页面脚本可能还没挂好监听（必应偶发），没反应就 `click` 搜索按钮，或 `wait -Stable` 后重试。
 - **专用实例是独立账号环境**：知乎/京东/微博这类要登录或有风控的站会跳登录页或验证页（`open` 返回的 `url`/`title` 能看出来）；它不会、也不该借用你日常浏览器里的登录态。Cloudflare「正在进行安全验证」页通常几秒后自动过，用 `wait -Find 目标文字 -Timeout 15000` 等。
@@ -142,11 +158,12 @@ $CU click -Name "保存设置"            # 不截图直接按名字点（UIA �
 $CU type -Id 6 -TextB64 5L2g5aW9 -Verify   # 输入后读回内容，返回 verify.contains=true/false
 ```
 
-- 看图决策时优先看 `cur-marks.jpg`，目标有编号就用 `-Id`，没有编号（画布、图片、自绘界面）再用坐标。
+- 看图决策时优先看 `cur-marks.jpg`，目标有编号就用 `-Id`（默认走 UIA 直调，见下），没有编号（画布、图片、自绘界面）再用坐标。
+- **`-Id` 默认按控件语义触发**（`click -Id N` → UIA `Invoke/Toggle/Select/Expand`，返回 `method:"uia"`、`via:"invoke"` 等）：不依赖坐标、不受遮挡影响，复选框/标签页/菜单项这类控件尤其可靠；控件被禁用时返回 `ERR_DISABLED` 而不是盲点。控件不支持这些模式时自动回退坐标点击（`method:"coord"`）。想强制坐标用 `-Method coord`。
 - **坐标吸附**：当前帧有控件列表时（`snap -Marks/-Uia` 之后），`click -X -Y` 落在控件内会在返回中注明 `on`；偏出控件 ≤6 图像像素时自动吸到最近控件中心（`snapped_to`）。`-NoSnapTo` 关闭。
 - `-Id` 只对产生它的那一帧有效：窗口移动/重截后要重新 `snap -Marks`（否则 `ERR_NO_MARKS` / `ERR_STALE_FRAME`）。
-- UIA 调用有超时（默认 1.5s，`-UiaTimeout`），超时返回空列表不会卡住。
-- **Chromium/Electron（QQ、微信新版、VS Code 等）通常不暴露 UIA 控件**（实测 QQ NT：0 个，超时），此时 `-Marks` 无编号，`-Name` 自动转 OCR——对这类程序直接用视觉坐标 + `-Find`。Win32 / WinForms / WPF / 资源管理器 / 设置等效果最好。
+- UIA 调用有超时（默认 1.5s，`-UiaTimeout`），超时返回空列表不会卡住；某进程连续超时会被记 10 分钟"UIA 不可用"（`els`/`-Name`/`snap -Marks` 跳过它直接走 OCR，省掉每次 1.5s），要重试加 `-UiaForce`。
+- **Chromium/Electron（QQ、微信新版、VS Code 等）通常不暴露 UIA 控件**（实测 QQ NT：0 个，超时），此时 `-Marks` 无编号，`-Name` 自动转 OCR——对这类程序直接用视觉坐标 + `-Find`。Win32 / WinForms / WPF / 资源管理器 / 设置等效果最好（实测 WinForms 按钮 `click -Id` → `method:"uia" via:"invoke"`，一次生效）。
 
 ## 精确点击（准）
 
@@ -164,18 +181,21 @@ $CU type -Id 6 -TextB64 5L2g5aW9 -Verify   # 输入后读回内容，返回 veri
 ## 输入与按键
 
 - 后台 `type` 默认 `-Method auto`：标准 Win32 编辑框用 `EM_REPLACESEL`（直接写入，中文/长文本一次完成，最可靠），其他控件逐字发 `WM_CHAR`。键盘消息发给**获得焦点的子控件**（v2 只发给顶层窗口，所以很多程序收不到）。
-- `-Method clip`：通过剪贴板粘贴，完成后自动恢复用户原来的剪贴板内容。
-- 前台 `-Fg`：用 `SendInput` 发 Unicode 字符（不依赖输入法、不占剪贴板）；超过 400 字自动改为粘贴。输入过程中焦点被切走会立即停止（`ERR_FOCUS_LOST`），不会打到别的窗口。
+- `type -Id N` / `-Name` 会**先点击该控件**再输入（与文档一致）；只用 `-X -Y` 也可以。
+- `-Method clip`：走系统剪贴板（原生 API，很快），`-Verify` 时读回确认后才恢复用户原来的剪贴板内容。
+- 前台 `-Fg`：用 `SendInput` 发 Unicode 字符（不依赖输入法、不占剪贴板；emoji 等代理对已验证可正常输入）；超过 400 字自动改为粘贴。输入过程中焦点被切走会立即停止（`ERR_FOCUS_LOST`），不会打到别的窗口。
+- **`-Verify` 与 `-Enter` 同时给时不会读回核对**（回车后焦点可能已跳走）：要核对就分两条命令（先 `type -Verify`，再 `key enter`）。
 - 中文或包含特殊字符的文本请用 `-TextB64`（UTF-8 base64），避免 shell 转义和编码问题。
 - `key` 在后台模式下：标准编辑框的 `ctrl+a/c/v/x/z` 直接走编辑消息（100% 生效）；其他程序的组合键是模拟的，部分程序会忽略（返回里有 `warn`）→ 用截图确认，不生效再按下面的规则切换到 `-Fg`。
 
 ## 后台 → 前台
 
-后台注入（PostMessage）对传统 Win32 程序、多数对话框/编辑框有效。**Chromium/Electron/CEF、WinUI、UWP、DirectX 游戏**经常忽略后台消息。判断方法：点击或输入后 `changed≈0`，并且截图上没有变化。
+后台注入（PostMessage）对传统 Win32 程序、多数对话框/编辑框有效。**Chromium/Electron/CEF、WinUI、UWP、DirectX 游戏**经常忽略后台消息。判断方法：点击或输入后 `no_change:true` / `changed≈0`，并且截图上没有变化——此时返回里会带 `hint` 直接说明原因（非客户区 / 该类窗口忽略后台输入），不用自己猜。
 
 - 前台模式 `-Fg` 会抢焦点，**必须上报并获得用户当次许可**才能使用。
+- **可选自动化**：设 `CU_FG_AUTO=1`（或逐命令 `-FgAuto`）后，`Chrome_WidgetWin_*` / `Qt*QWindow*` 窗口的点击/输入/滚轮自动走前台路径（返回 `fg_auto:true`），单条命令里 `-BgForce` 可以退回去。默认**关闭**，保持"不动光标、不抢焦点"的默认契约；用户同意长期自动前台时再打开（改环境变量后 `cu.exe --stop` 重启常驻进程生效）。
 - `-Fg` 会先把目标窗口置前，失败返回 `ERR_NOFOCUS`，什么都不发送；目标点被别的窗口挡住返回 `ERR_OCCLUDED`，不会误点；点击完成后光标恢复原位（`-KeepCursor` 可以关闭）。
-- Electron 应用（QQ、微信新版、VS Code 等 `Chrome_WidgetWin_1` 窗口）实测结论：截图用后台（`-Restore`/PrintWindow），点击/输入直接 `-Fg`，不要先试后台浪费一轮；UIA 拿不到控件，直接视觉坐标 / `-Find`。完整实测案例见 `REFERENCE.md`。
+- Electron 应用（QQ、微信新版、VS Code 等 `Chrome_WidgetWin_1` 窗口）实测结论：截图用后台（`-Restore`/PrintWindow），点击/输入直接 `-Fg`（或开 `CU_FG_AUTO=1`），不要先试后台浪费一轮；UIA 拿不到控件，直接视觉坐标 / `-Find`。完整实测案例见 `REFERENCE.md`。
 
 ## 错误码
 
@@ -192,12 +212,13 @@ $CU type -Id 6 -TextB64 5L2g5aW9 -Verify   # 输入后读回内容，返回 veri
 | `ERR_OUTSIDE_IMAGE` | 坐标超出图片范围 → 检查是否用了错误的图 |
 | `ERR_MINIMIZED` | 窗口已最小化 → `snap -Restore`（恢复窗口但不激活） |
 | `ERR_REGION` / `ERR_CAPTURE` / `ERR_SAVE`、`warn: ERR_BLANK` | 截图失败类：区域在窗口外 / 抓帧失败（消息带实际用的 screen/print）/ 写图文件失败；空白图（Chromium 不绘制后台窗口）→ 重试或经许可 `activate` 后重截 |
-| `ERR_NO_OCR` | 没有可用的 OCR 语言包 → 设置 → 时间和语言 → 语言，添加要识别的语言（OCR 只认用户语言列表） |
+| `ERR_NO_OCR` / `ERR_OCR_TIMEOUT` | 没有可用的 OCR 语言包 → 设置 → 时间和语言 → 语言添加（OCR 只认用户语言列表，也可 `-Lang zh-Hans-CN` 指定；可用的用 `-Lang` 试不出来时看返回 msg）/ OCR 引擎 15 秒无响应（罕见，重试一次） |
 | `ERR_TEXT_NOT_FOUND` | OCR（或 UIA 兜底 OCR）没找到文字 → 看图确认文字真的可见，或改用坐标 |
 | `ERR_OCR` / `ERR_CLIPBOARD` / `ERR_NO_PTS` / `ERR_SAME_FILE` / `ERR_MARK` | 参数与辅助类：OCR 预处理失败；剪贴板写入失败（改 `-TextB64`）；`mark` 缺 `-Pts`/`-X -Y`；输入输出同一文件；画标注失败 |
 | `ERR_KEY` / `ERR_TIMEOUT` | 按键组合无法识别（查 `-Keys` 拼写）/ `wait -Find` 或编辑框写入超时（截图确认实际状态） |
 | `ERR_NOFOCUS` / `ERR_OCCLUDED` / `ERR_FOCUS_LOST` | 前台模式的安全拦截，什么都没发送或已停止 |
 | `ERR_NO_MARKS` / `ERR_NO_ELEMENT` | 当前帧没有控件列表 / 没有这个编号 → `snap -Marks` |
+| `ERR_DISABLED` | UIA 直调发现控件被禁用（灰按钮）→ 先满足启用条件，不要盲点 |
 | `ERR_STEP` / `ERR_EXCEPTION` | `do` 第 N 步失败（返回带 `step` 下标和各步结果）/ 未捕获异常（看 msg） |
 | `ERR_DAEMON` | 常驻进程中途退出 → 重试一次；仍失败设 `CU_NODAEMON=1` |
 | `ERR_LOAD` | C# 编译失败（通常是 cu.cs / uia.cs 被改坏了） |
@@ -217,7 +238,18 @@ web 层：
 | `ERR_BROWSER` / `ERR_PROFILE` / `ERR_START` | 找不到 Edge/Chrome 安装 / 专用用户目录创建失败 / 浏览器启动失败或秒退 → 看 msg |
 | `ERR_TIMEOUT` | 调试端口 12s 没开（可能被占用，`web stop` 后重试）/ 页面加载超时 / `wait` 条件未满足 |
 | `ERR_CDP` / `ERR_WS` / `ERR_CLOSED` / `ERR_ATTACH` / `ERR_NAV` | CDP 通信错误（响应异常、WebSocket 连不上/断开、标签附着失败、导航被拦截）→ 浏览器正忙或刚崩，`web stop` 后重来 |
-| `ERR_JS` / `ERR_CLICK` / `ERR_KEYS` / `ERR_SEL` / `ERR_LOAD` / `ERR_SHOT` | 页内执行类：eval 的 JS 抛异常 / DOM click 失败（页面可能刚跳转，重试）/ 未知修饰键 / 选择器语法错 / `web-lib.js` 加载失败 / 截图数据为空 → 各看 msg |
+| `ERR_JS` / `ERR_CLICK` / `ERR_KEYS` / `ERR_SEL` / `ERR_LOAD` / `ERR_SHOT` / `ERR_TYPE` | 页内执行类：eval 的 JS 抛异常 / DOM click 失败（页面可能刚跳转，重试）/ 未知修饰键 / 选择器语法错 / `web-lib.js` 加载失败 / 截图数据为空 / 内容填不进目标元素 → 各看 msg |
+
+## 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `CU_STATE` | 状态目录（默认插件根 `state\`；插件更新会换目录，登录状态重要时指向固定位置） |
+| `CU_IDLE` | 常驻进程空闲退出分钟数（默认 20） |
+| `CU_NODAEMON=1` | 不用常驻进程，每条命令直接起 PowerShell（慢 ~500ms，调试用） |
+| `CU_FG_AUTO=1` | Chromium/Electron/Qt 窗口的动作自动走前台（默认关；需 `cu.exe --stop` 后生效） |
+| `CU_SETTLE_QUIET=<毫秒>` | 动作后"没变化就提前返回"的窗口，默认 250（需重启常驻进程） |
+| `CU_SLOW=1` | 恢复旧版较慢的输入时序（个别应用漏收事件时兜底；需重启常驻进程） |
 
 ## 安全规则
 
@@ -228,7 +260,12 @@ web 层：
 
 ## 兼容旧脚本
 
-`snap.ps1 / act-bg.ps1 / act.ps1 / mark.ps1 / type.ps1 / info.ps1 / ocr.ps1` 仍可按旧参数调用，内部转发到 `cu.ps1`，输出改为 JSON 格式（v2/v3 的原始脚本只存在于旧版分享包，本包内没有备份副本）。
+`snap.ps1 / act-bg.ps1 / act.ps1 / mark.ps1 / type.ps1 / info.ps1 / ocr.ps1` 仍可按旧参数调用，内部转发到 `cu.ps1`，输出改为 JSON 格式（v2/v3 的原始脚本只存在于旧版分享包，本包内没有备份副本）。注意 v2 的 `snap.ps1` 已跟随 cu.ps1 的尺寸上限（不再输出全分辨率大图）；确需大图用 `cu.ps1 snap -MaxSide 3000` 或 `-MaxPixels`。
+
+其它细节：
+- `els` 返回的元组长度取决于空间：frame 空间是 `[id,type,name,cx,cy,w,h(,0)]`（7/8 元），screen 空间是 `[id,type,name,cx,cy]`（5 元）。
+- `snap -Marks` 生成的标注图文件名跟随 `-Out`（如 `-Out x.png` → `x-marks.png`），默认 `state/cur-marks.jpg`。
+- 从旧版本升级后，专用浏览器实例仍在跑旧版目录的进程：先 `web stop` 一次，新版本会用自己的目录重新拉起。
 
 ## 截图回传
 

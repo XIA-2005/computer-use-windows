@@ -1,5 +1,46 @@
 # Changelog
 
+## 6.1.0（2026-10-05）— 更快更准：正确性修复 + 精度增强
+
+正确性（P0）：
+
+- **OCR 结果缓存指纹修复**：原实现按固定步长跨字节抽样（4K 窗口每 ~123 字节才采 1 个），画面局部小改会被漏掉 → `find` 复用过期 OCR 结果、返回旧坐标，`wait -Find` 误判"没出现"。改为分块覆盖采样（4096 块，块内等距采样并把块号混入哈希），任意局部改动必被覆盖，开销不变。
+- **`web eval` 超时不再重发**：`Runtime.evaluate` 超时后原会重试一次，有副作用的 JS（点击/提交）可能执行两遍；现在与 `Input.*` 一致只发一次（会话/连接类错误仍会重连重试）。
+- **UIA `busy` 不再永久锁死**：旧实现里一次挂死的 UIA walk 会让之后所有 UIA 调用直接返回空列表；现在超过 30s 视为僵尸并放行新 walk（并发上限 3），状态区分 `busy` / `busy-zombie`。
+- **UIA 不可用记忆**：UIA 每次都超时的进程（QQ NT 等实测）记住 10 分钟，`els` / `-Name` / `snap -Marks` 直接跳过 UIA 走 OCR（省掉每次 1.5s 空等）；`-UiaForce` 可强制重试。
+- **`snap.ps1`（v2 兼容包装）不再绕过尺寸上限**：原来传 `MaxSide=0; MaxPixels=0`，两个上限全绕过 → 4K 窗口输出全分辨率大图；改为跟随 cu.ps1 默认上限（判断改 `-le 0` 兜底）。
+- **blank 重试只对 PrintWindow 生效**：原来屏幕抓取也参与"空白图"重试——大面积纯色窗口每次截图白等最多 1s 并误报 `ERR_BLANK`；现在 screen 路径不重试、不报空白，print 路径重试 3×150ms。
+- **OCR 结果缓存改双槽（plain/prep）**：两遍 OCR 不再互相顶掉缓存，静态画面下重复 `find` / `wait -Find` 轮询零 OCR。
+- **WinRT 调用 15s 超时**：OCR 引擎卡死不再挂起整个常驻进程（报 `ERR_OCR_TIMEOUT`）。
+- **新增 `-Lang <tag>`**：指定 OCR 语言（如 `-Lang zh-Hans-CN`）；语言包已装但不在用户配置列表时也能用，tag 不对会得到明确报错。
+
+更快（P1）：
+
+- 动作后"没变化就提前返回"窗口 400→250ms（`-Quiet` / `CU_SETTLE_QUIET` 可调），首查 25→15ms、轮询 30→20ms；返回新增 `no_change` 字段。
+- 注入时序默认减半（后台 mousemove→down 8→3ms、down→up 20→10ms，双击 20→12ms，前台 40→20ms，拖拽/滚动/WaitStable/聚焦等待同步缩短），`CU_SLOW=1` 一键恢复旧时序。
+- 剪贴板改原生 API（`Get-/Set-Clipboard` cmdlet 每次 30–60ms → 1–2ms），`-Verify` 时读回确认后再恢复用户剪贴板（原来固定等 350ms）。
+- web 层轮询压缩：`start` 150→60ms（前 2s）、`open`/ready 30→15ms、`wait` 切片 50→35ms、`target=_blank` 空轮询 1500→700ms。
+- 输出体积：`web text` 默认 20000 字符（`-Max` 可调）、`ocr` 默认 300 行（`-Max`，超出带 `truncated`）、桌面 `els` 支持 `-Size` 上限。
+
+更准（P2）：
+
+- **OCR 三级匹配**：精确子串 → 归一化（全角→半角、去标点/符号）→ 模糊（易混字符 0/O、1/l/I、5/S… 折叠 + 编辑距离 ≤1，查询 ≥4 字符）。命中带 `match:"exact|norm|fuzzy"`；`-Strict` 只走前两级。
+- **多候选一次识别**：`-Find "保存|确定|Save"`（`click -Find` / `find` / `wait -Find` 均支持），一次 OCR 服务多个候选并给出命中情况。
+- **点击返回带命中信息**：`click -Find` 返回 `hit_box`（命中框）、`match`、`alts`（其它候选文本 + 中心点），换目标不用再跑一次 OCR。
+- **UIA 控件直调点击**：`click -Id` / `-Name` 默认按控件语义触发（`Invoke/Toggle/SelectionItem/ExpandCollapse`，返回 `method:"uia"`），不受遮挡与坐标误差影响；控件禁用直接报 `ERR_DISABLED`；不支持时自动回退坐标点击（`method:"coord"`），`-Method coord` 可强制。
+- **`type -Id/-Name` 现在真的会先点击目标控件**（文档一直这么写，代码此前忽略了这两个参数）。
+- **Chromium/Electron/Qt 自动前台（可选，默认关）**：`CU_FG_AUTO=1` 或 `-FgAuto` 时这类窗口的动作自动走前台（`fg_auto:true`），`-BgForce` 单次退回；默认关闭以保持"不动光标、不抢焦点"。
+- **后台动作失败给 `hint`**：非客户区、Chromium 忽略后台消息、"没变化"等直接返回可读原因与下一步建议，省掉一轮排查。
+- **web 点击后校验**：派发后校验该点是否仍命中目标元素（`verified`），布局移动时安全补点一次（`retried:true`）；元素已消失（跳转）不补点。
+- `BgMouse` 返回 `in_client`；`click` 返回 `method`。
+
+验证与打包：
+
+- 新增 `web/bench/desktop.ps1`（自建 WinForms 测试窗口的全链路回归：blank 重试、OCR 缓存、QuickHash 变更检测、UIA 直调、坐标回退、settle、剪贴板、emoji、`-Fg`），本机全部通过；`web/bench/bench.ps1` 与 v6 基线对比无回退。数字见 `skills/computer-use/REFERENCE.md`。
+- SKILL.md：调用行改为 Git Bash 可用写法（原 `CU='"..."'` 只在 cmd.exe 成立）、补新参数/字段/环境变量、错误码表补 `ERR_DISABLED`/`ERR_OCR_TIMEOUT`/`ERR_TYPE`、修正与实测不符的性能宣称。
+- 新增 `win/build.ps1`：可复现编译 `client.cs → cu.exe` 与核心 DLL；包内带预编译 DLL（hash 命中即省首次 3–8s 编译，不匹配自动现场编译）。
+- CHANGELOG 移入插件包（原来在仓库根，插件安装后读不到）。
+
 ## 6.0.1（2026-10-05）— 文档与打包修订
 
 - SKILL.md 瘦身：版本历史、bench 实测数据、QQ NT 案例移到 `skills/computer-use/REFERENCE.md`（按需阅读，不再随技能全文加载）。

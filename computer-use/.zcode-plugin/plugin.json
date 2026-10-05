@@ -1,7 +1,7 @@
 {
   "name": "computer-use",
-  "version": "6.0.1",
-  "description": "Windows 电脑操作原语工具包：截图给多模态模型直接看、DPI 精确点击/输入、OCR 找字、UI Automation 控件级操作，附 Chrome DevTools Protocol 浏览器层（cu.exe）。",
+  "version": "6.1.0",
+  "description": "Windows 电脑操作原语工具包：截图给多模态模型直接看、DPI 精确点击/输入、OCR 找字（三级匹配）、UI Automation 控件直调，附 Chrome DevTools Protocol 浏览器层（cu.exe）。",
   "author": { "name": "XIA-2005" },
   "skills": "./skills"
 }
