@@ -5,6 +5,7 @@
 ## 环境要求
 - Windows 10/11 x64，PowerShell 5.1（系统自带），.NET Framework 4.x（系统自带，首次运行用它的 csc 编译 C# 核心，约 3–8 秒）。
 - 浏览器层需要本机装有 Microsoft Edge 或 Google Chrome（默认 Edge，`-Browser chrome` 切换）。
+- OCR（`find` 找字）依赖 Windows 语言包：「设置 → 时间和语言 → 语言」里需包含要识别的语言，否则报 `ERR_NO_OCR`。
 - 不需要安装任何东西，不需要管理员权限。
 
 ## 安装
@@ -27,10 +28,14 @@
 
 ## 目录（以 `computer-use/` 插件文件夹为根）
 - `skills\computer-use\SKILL.md` — 手册（给模型读的那份也是它；顶部含 ZCode 技能 frontmatter）。
+- `skills\computer-use\REFERENCE.md` — 附属参考：web 层实测数据、Electron（QQ NT）实测案例，按需阅读。
 - `.zcode-plugin\plugin.json` — ZCode 插件清单（技能入口指向 `skills\`）。
-- `win\` — 全部代码：`cu.exe`（快速入口）、`cu.ps1`（分发）、`cu.cs`/`uia.cs`/`web.cs`（C# 核心，首次运行自动编译到 `win\bin\`）、`web-lib.js`（浏览器页内助手，改了即时生效）。
+- `win\` — 全部代码：`cu.exe`（快速入口，由同目录 `client.cs` 编译而来，被杀软误报时可对照源码核对）、`cu.ps1`（分发）、`cu.cs`/`uia.cs`/`web.cs`（C# 核心，首次运行自动编译到 `win\bin\`）、`web-lib.js`（浏览器页内助手，改了即时生效）。
 - `web\bench\` — 基准与真实站点测试脚本（`bench.ps1`、`sites.ps1`）和 2026-09-26 的测试报告。
 - `state\` — 运行时状态（截图、帧文件、浏览器专用用户目录），自动生成；分享包里是空的。
+- 仓库根还有 `CHANGELOG.md`（版本历史）。
+
+> **插件方式安装的注意**：此时 `state\` 会落在 ZCode 的插件缓存目录里，插件更新或重装时可能被清掉（浏览器专用实例的登录态会丢）。建议设置环境变量 `CU_STATE` 把状态目录指到缓存之外的位置，例如 `%LOCALAPPDATA%\computer-use\state`。
 
 ## 安全提示
 - 默认后台注入、不动光标、不抢焦点；`-Fg` 前台模式会抢焦点，脚本层没有限制，请在你自己的规则里要求「每次都先征得同意」。

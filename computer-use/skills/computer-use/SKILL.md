@@ -8,10 +8,7 @@ description: 操作 Windows 桌面应用与专用浏览器实例的原语工具�
 > **路径基准**：本文件位于分享包 / ZCode 插件的 `skills\computer-use\` 下。下文提到的 `win\`、`web\`、`state\` 一律相对于**分享包 / 插件根**（即本文件所在目录的上两级）；`cu.exe` 的完整相对路径 = 本技能目录的 `..\..\win\cu.exe`。
 
 > 定位：与具体应用无关的 Windows Computer Use 原语。截图交给**原生多模态模型直接看**，模型输出图上坐标，脚本负责把坐标**精确**映射回屏幕并注入。ShunCode 本体零改动。
-> v6（2026-09-26）：**浏览器层重做**——文字定位引擎（剪枝 DFS：嵌套按钮/aria-label/title/placeholder/label/alt 都能按字找，穿透 open shadow DOM 与同源 iframe，隐藏元素靠后，返回 `count/alts` 提示歧义）；默认**真实鼠标点击**（move→press→release，先做命中测试，被遮挡自动退回 DOM click 并 `warn`）；`web els` 编号元素 + `-Id`、`web shot -Marks` 编号截图、`web find`、`web hover`、`web scroll`；`type` 发标准 InputEvent + keyup，contenteditable 走可信 `Input.insertText`（富文本编辑器可用），`-Method keys`；`wait` 改为页内 MutationObserver（元素一出现立刻返回）+ `-Stable`；`shot` 由浏览器按比例直接输出（不再解码重编码，快 2–3 倍）；同 URL 重开也能正确等待，`open` 返回 `title`/`ready`（load 事件被慢资源拖住时按 `interactive` 返回可用页面而不是超时）；`type` 默认走**可信输入**（`Input.insertText`，页面看到的和真人打字一样，Enter 能提交必应这类监听状态的搜索框）；点开 `target=_blank` 链接会**自动跟到新标签**；会话标签跑到后台时自动激活（后台标签没有帧、按键会被忽略）；每条命令不再做 HTTP 探活、常驻进程不再每次 Full GC；专用实例带 `--disable-backgrounding-occluded-windows` 等参数（窗口被挡住时鼠标事件不再卡 4 秒，**旧实例需 `web stop` 一次**）。**桌面层同轮优化**：OCR 改为内存直通（不再写读 PNG，`find` 642→~450ms，带 `-Region` ~150ms），画面没变时直接复用上次 OCR 结果（`wait -Find` 轮询、同一屏多次 `find` 几乎零成本，返回 `cached:true`）；`-Title/-Proc` 3 秒内复用已解析的窗口、进程名缓存 1 分钟（`snap` 275→150ms，`info` 113→48ms）；缩图改 HighQualityBilinear。基准：`web\bench\bench.ps1`（本地页）+ `web\bench\sites.ps1`（真实站点，Edge/Chrome 双实例）。
-> v5（2026-09）：**浏览器层 `web`（Chrome DevTools Protocol）**——专用独立浏览器实例（不碰日常窗口），DOM 级点击/填表/读字/等待，单步内部耗时 3–80ms（截图路径的 1/3–1/5），支持 `-Sel` CSS 选择器、`-Text` 按文字点、`web shot` 后 `-X -Y` 图坐标点击、`-Verify` 读回核对、标签页管理。
-> v4（2026-09）：`cu.exe` 常驻进程（单次调用 ~50–250ms，原来 ~600ms）；UI Automation 控件层（`snap -Marks` 编号框、`click -Id`、`click -Name`、坐标自动吸附控件、`type -Verify` 读回校验）；动作后局部稳定检测（没变化 0.4s 就返回）；OCR 局部对比度预处理（能识别 QQ 蓝底白字“发送”）+ `-Region`；Chromium 空白帧检测。
-> v3（2026-09）：统一入口 `win/cu.ps1`，C# 核心预编译缓存，DPI 精确映射，帧文件坐标协议，动作后自动等待画面稳定 + 可选同步回截图，OCR 找字点击，批量动作。旧脚本名保留为兼容包装。
+> 当前 v6（2026-09-26）：浏览器层 CDP 重做（真实鼠标点击、可信输入、文字定位引擎），桌面层提速（OCR 内存直通与结果复用）。完整版本历史见仓库根 `CHANGELOG.md`，实测数据与 Electron 案例见同目录 `REFERENCE.md`。
 
 ## 铁律（不变）
 
@@ -23,7 +20,7 @@ description: 操作 Windows 桌面应用与专用浏览器实例的原语工具�
 ## 调用方式
 
 ```bash
-CU='"<本技能目录>\..\..\win\cu.exe"'      # 推荐：快（<本技能目录> = 本 SKILL.md 所在目录；cu.exe 固定在插件根的 win\ 下）
+CU='"<本技能目录>\..\..\win\cu.exe"'      # 推荐：快（<本技能目录> = 本 SKILL.md 所在目录；cu.exe 固定在插件根的 win\ 下；值里嵌双引号是故意的——路径可能含空格）
 $CU <cmd> [参数]        # 每条命令只输出一行 JSON；ok:false 时退出码 1
 # 兼容/兜底：powershell -NoProfile -ExecutionPolicy Bypass -File "<本技能目录>\..\..\win\cu.ps1" <cmd> [参数]
 ```
@@ -48,7 +45,7 @@ $CU <cmd> [参数]        # 每条命令只输出一行 JSON；ok:false 时退�
 | `type` | 输入文字（可先点击输入框、可回车） | `-Text` / `-TextB64`（UTF-8 base64，中文最稳）/ `-TextFile`；`-X -Y` / `-Id` / `-Name` / `-Find`；`-Enter`；`-Verify`（读回输入框内容核对）；`-Method auto/replacesel/char/clip` |
 | `mark` | 点前预览：画准星 + 生成 4× 放大核对图 | `-X -Y` 或 `-Pts "x:y,x:y"`；`-Zoom 24`（0=不出放大图） |
 | `find` | OCR 找字，返回帧图坐标（中心 cx,cy）；返回 `pass`（plain/prep 哪一遍命中）和 `cached`（画面未变，复用了上次识别） | `-Find 文字` `-Index n` `-Region x,y,w,h`（只识别帧图的一块，快 3–8 倍） |
-| `ocr` | 全部文字行 + 坐标（帧图坐标） | |
+| `ocr` | 全部文字行 + 坐标（帧图坐标） | `-Path 图片`（识别指定图片）；`-Region x,y,w,h`（只识别帧图一块，快）；`-Method auto/screen/print` |
 | `wait` | 等文字出现 / 等画面稳定 / 固定等待 | `-Find 文字 -Timeout 8000` / `-Stable` / `-Ms 300` |
 | `activate` | 把目标窗口置前（前台模式前用） | |
 | `frame` | 打印当前帧信息 | |
@@ -56,6 +53,10 @@ $CU <cmd> [参数]        # 每条命令只输出一行 JSON；ok:false 时退�
 | `web <子命令>` | **浏览器 CDP 层**（见下文「浏览器层」）：点按钮/填表/读字/截图都不走屏幕 | `-Browser edge\|chrome` `-Url` `-Sel` `-Text`/`-TextB64` `-Id` `-Index` `-Exact` `-Js` `-X -Y` `-Wheel` `-NewTab` `-Marks` `-Verify` |
 
 通用：`-Frame <帧文件或图片路径>` 指定用哪张截图的坐标系（默认最近一次 snap/zoom）；`-Screen` 表示坐标是物理屏幕像素；`-Force` 跳过窗口移动检查；`-Settle 毫秒` 动作后最多等多久画面稳定（默认 1000，0=不等）；`-Quiet 毫秒` 动作后这么久画面（整窗 + 点击点周围局部）都没变化就提前返回（默认 400）。
+
+别名：`dbl`=`double`、`rclick`/`mclick`=`click`（右/中键）；web 子命令 `go`/`nav`=`open`、`locate`=`find`、`txt`=`text`、`value`=`val`、`elements`=`els`、`forward`=`fwd`；`type -Method paste` 等于 `-Method clip`。
+
+OCR 语言前提：Windows OCR 只识别「设置 → 时间和语言 → 语言」里已安装的语言（中英混排界面需对应语言包都在）；一个可用语言都没有时 `find`/`ocr` 报 `ERR_NO_OCR`。
 
 ## 坐标协议：帧（frame）—— 零换算、DPI 安全
 
@@ -130,8 +131,7 @@ $CU web stop                                     # 用完关掉整个实例
 - 返回里的 `ackLate:true` = 浏览器收下了事件但确认迟到（页面正忙/正在跳转），动作已发出，接着 `wait` 即可。
 - `web type` 后 `visible:false` 表示填进了一个不可见的输入框（老站常留着隐藏的表单）——真人不可能在那里输入，改用 `web els` 里列出的那个。
 - Electron 应用内嵌页面**没有** CDP 端口，仍走原来的 `snap/click`（`-Fg`）；浏览器普通窗口（非专用实例）也不在 CDP 覆盖内。
-- 真实站点（2026-09-26，Edge 与 Chrome 专用实例各跑一遍 `web\bench\sites.ps1`）：B 站首页 `els` 76 个元素 11ms、点「热门」自动跟到新标签并 `wait -Url` 31ms；网易云音乐主内容在同源 iframe 里，`els`/`find`/`click` 直接穿透，点「排行榜」后 `wait -Url toplist` 3ms；GitHub 仓库页 `click Issues`（真实鼠标）+ `wait` 0.9s、`hover` 真实悬停、`/` 快捷键打开搜索；必应 `type -Enter` → 结果页 0.8–1.4s；豆瓣搜索全流程 <1.5s。
-- 实测（2026-09-26，本机 3120×1984@200%，含 cu.exe 管道开销，`web\bench\bench.ps1 -N 5` 中位数）：`web text` 49ms（v5 64）；`click -Text` 69–83ms 且带 pointerdown/mousedown（v5 59–91，只有 click 事件，mousedown 菜单/aria-label 图标/悬停都做不到）；`type -Verify` 59ms（v5 66，无 InputEvent/keyup）；contenteditable 56ms（v5 245）；`wait -Sel`（元素 350ms 后出现）364ms（v5 964）；`shot` 视口 162ms / 整页 147ms（v5 480 / 744）；`web open` 本地页 111ms（v5 191）；`els` 49ms；`hover` 77ms；批量 `do` 5 步 web 动作 284ms。
+- 实测数据（真实站点流程、本地基准、v5 对比）见同目录 `REFERENCE.md`，基准脚本在 `web\bench\`。
 
 ## 控件层（UI Automation）—— 比目测坐标更准
 
@@ -175,44 +175,49 @@ $CU type -Id 6 -TextB64 5L2g5aW9 -Verify   # 输入后读回内容，返回 veri
 
 - 前台模式 `-Fg` 会抢焦点，**必须上报并获得用户当次许可**才能使用。
 - `-Fg` 会先把目标窗口置前，失败返回 `ERR_NOFOCUS`，什么都不发送；目标点被别的窗口挡住返回 `ERR_OCCLUDED`，不会误点；点击完成后光标恢复原位（`-KeepCursor` 可以关闭）。
-
-## 实测：QQ NT（Electron，2026-09-23）
-
-| 操作 | 后台 | 前台 `-Fg` |
-|---|---|---|
-| 截图（窗口最小化 / 被遮挡） | ✓ `snap -Restore`，PrintWindow | — |
-| 点击 / 滚动 | ✗ `changed=0`（Chromium 忽略 PostMessage） | ✓ |
-| 中文 + emoji 输入 | — | ✓ Unicode SendInput |
-| `click -Find "我的手机"` | — | ✓ OCR 定位并点中 |
-| 发消息（给“我的手机”） | — | ✓ 输入 → 点击发送 → 截图确认 |
-
-结论：QQ、微信（新版）、Chrome、VS Code、ShunCode 这类 `Chrome_WidgetWin_1` 窗口，**截图用后台，操作直接用 `-Fg`**（需用户许可），不要先试后台浪费一轮。
-OCR：v4 的第二遍用局部对比度预处理，蓝底白字“发送”已能识别（实测 `find -Find 发送` → (1269,828)，与目测一致）；加 `-Region` 限定在底部区域约 0.5 秒。
-UIA：QQ 不暴露控件（`els` 超时 0 个），不要用 `-Marks/-Name`，直接视觉坐标 / `-Find`。
-截图：QQ 最小化或被遮挡时可能画出纯灰空白图，v4 会自动重试并在返回里给 `warn: ERR_BLANK`，这时需要（经许可）`activate` 后再截。
+- Electron 应用（QQ、微信新版、VS Code 等 `Chrome_WidgetWin_1` 窗口）实测结论：截图用后台（`-Restore`/PrintWindow），点击/输入直接 `-Fg`，不要先试后台浪费一轮；UIA 拿不到控件，直接视觉坐标 / `-Find`。完整实测案例见 `REFERENCE.md`。
 
 ## 错误码
+
+任何一步失败 → 停下来上报，**不要**静默重试或自行切换到前台模式。同族错误码合并在一行；每条返回的 `msg` 都有具体原因。
+
+桌面层（snap/click/type/find/mark/do）：
 
 | 码 | 含义 / 处理 |
 |---|---|
 | `ERR_NO_WINDOW` | 找不到窗口 → `info -Title 关键字` 查看准确标题，或用 `-Proc` / `-Hwnd` |
-| `ERR_STALE_FRAME` | 窗口在截图后被移动或缩放 → 重新 snap |
-| `ERR_FRAME_MISMATCH` | 当前帧属于另一个窗口 → 先 snap 这个窗口 |
+| `ERR_ARGS` | 参数缺失或格式不对（消息里写明缺什么，如 `-Region` 要 x,y,w,h） |
+| `ERR_NO_FRAME` | 没有当前帧 → 先 `snap`；`-Id` 必须用 `snap -Marks` 产生的帧 |
+| `ERR_STALE_FRAME` / `ERR_WINDOW_GONE` / `ERR_FRAME_MISMATCH` | 帧失效：窗口被移动/缩放/已关闭/帧属于别的窗口 → 重新 snap（窗口没了先 `info`） |
 | `ERR_OUTSIDE_IMAGE` | 坐标超出图片范围 → 检查是否用了错误的图 |
 | `ERR_MINIMIZED` | 窗口已最小化 → `snap -Restore`（恢复窗口但不激活） |
-| `ERR_TEXT_NOT_FOUND` | OCR 没有找到文字 → 看图确认，或改用坐标 |
+| `ERR_REGION` / `ERR_CAPTURE` / `ERR_SAVE`、`warn: ERR_BLANK` | 截图失败类：区域在窗口外 / 抓帧失败（消息带实际用的 screen/print）/ 写图文件失败；空白图（Chromium 不绘制后台窗口）→ 重试或经许可 `activate` 后重截 |
+| `ERR_NO_OCR` | 没有可用的 OCR 语言包 → 设置 → 时间和语言 → 语言，添加要识别的语言（OCR 只认用户语言列表） |
+| `ERR_TEXT_NOT_FOUND` | OCR（或 UIA 兜底 OCR）没找到文字 → 看图确认文字真的可见，或改用坐标 |
+| `ERR_OCR` / `ERR_CLIPBOARD` / `ERR_NO_PTS` / `ERR_SAME_FILE` / `ERR_MARK` | 参数与辅助类：OCR 预处理失败；剪贴板写入失败（改 `-TextB64`）；`mark` 缺 `-Pts`/`-X -Y`；输入输出同一文件；画标注失败 |
+| `ERR_KEY` / `ERR_TIMEOUT` | 按键组合无法识别（查 `-Keys` 拼写）/ `wait -Find` 或编辑框写入超时（截图确认实际状态） |
 | `ERR_NOFOCUS` / `ERR_OCCLUDED` / `ERR_FOCUS_LOST` | 前台模式的安全拦截，什么都没发送或已停止 |
 | `ERR_NO_MARKS` / `ERR_NO_ELEMENT` | 当前帧没有控件列表 / 没有这个编号 → `snap -Marks` |
-| `warn: ERR_BLANK` | 截到的是空白图（Chromium 不绘制后台窗口）→ 经许可 `activate` 后重截 |
+| `ERR_STEP` / `ERR_EXCEPTION` | `do` 第 N 步失败（返回带 `step` 下标和各步结果）/ 未捕获异常（看 msg） |
 | `ERR_DAEMON` | 常驻进程中途退出 → 重试一次；仍失败设 `CU_NODAEMON=1` |
-| `ERR_TEXT_NOT_FOUND` / `ERR_NOT_FOUND` / `ERR_INDEX`（web） | 页面里没有这段文字 / 选择器无匹配 / `-Index` 超出 `count` → `web els` 或 `web text` 看看页面到底有什么 |
-| `ERR_OCCLUDED`（web，`-Method mouse`） | 元素中心被 `cover` 里的元素挡住，真实鼠标点不到 → 先关弹窗/滚动，或 `-Method js` |
-| `ERR_HIDDEN`（web，`-Method mouse`） | 浏览器窗口最小化/不可见，无法产生帧 → 恢复窗口，或 `-Method js` |
-| `ERR_NO_MARKS` / `ERR_NO_ELEMENT` / `ERR_STALE`（web） | 还没 `web els` / 编号不存在 / 该元素已从页面消失 → 重新 `web els` |
-| `ERR_NOT_EDITABLE` / `ERR_NO_FOCUS` / `ERR_DISABLED`（web type） | 目标不是输入框 / 没有焦点元素又没给 -Sel / 元素被禁用 |
 | `ERR_LOAD` | C# 编译失败（通常是 cu.cs / uia.cs 被改坏了） |
 
-任何一步失败 → 停下来上报，**不要**静默重试或自行切换到前台模式。
+web 层：
+
+| 码 | 含义 / 处理 |
+|---|---|
+| `ERR_TEXT_NOT_FOUND` / `ERR_NOT_FOUND` / `ERR_INDEX` | 页面里没有这段文字 / 选择器无匹配 / `-Index` 超出 `count` → `web els` 或 `web text` 看看页面到底有什么 |
+| `ERR_OCCLUDED`（`-Method mouse`） | 元素中心被 `cover` 里的元素挡住，真实鼠标点不到 → 先关弹窗/滚动，或 `-Method js` |
+| `ERR_HIDDEN`（`-Method mouse`） | 浏览器窗口最小化/不可见，无法产生帧 → 恢复窗口，或 `-Method js` |
+| `ERR_NO_MARKS` / `ERR_NO_ELEMENT` / `ERR_STALE` | 还没 `web els` / 编号不存在 / 该元素已从页面消失 → 重新 `web els` |
+| `ERR_NOT_EDITABLE` / `ERR_NO_FOCUS` / `ERR_DISABLED`（web type） | 目标不是输入框 / 没有焦点元素又没给 -Sel / 元素被禁用 |
+| `ERR_NO_FRAME` | `web click -X -Y` 但还没有 `web shot` 的图 → 先 `web shot` |
+| `ERR_NOT_RUNNING` | 专用浏览器没在运行 → `web start`（多数 web 命令会自动拉起，一般是刚 `web stop` 过） |
+| `ERR_ARGS` | 参数问题（`-Browser` 取值、缺 `-Url`/`-Keys`/`-Js` 等，消息里写明） |
+| `ERR_BROWSER` / `ERR_PROFILE` / `ERR_START` | 找不到 Edge/Chrome 安装 / 专用用户目录创建失败 / 浏览器启动失败或秒退 → 看 msg |
+| `ERR_TIMEOUT` | 调试端口 12s 没开（可能被占用，`web stop` 后重试）/ 页面加载超时 / `wait` 条件未满足 |
+| `ERR_CDP` / `ERR_WS` / `ERR_CLOSED` / `ERR_ATTACH` / `ERR_NAV` | CDP 通信错误（响应异常、WebSocket 连不上/断开、标签附着失败、导航被拦截）→ 浏览器正忙或刚崩，`web stop` 后重来 |
+| `ERR_JS` / `ERR_CLICK` / `ERR_KEYS` / `ERR_SEL` / `ERR_LOAD` / `ERR_SHOT` | 页内执行类：eval 的 JS 抛异常 / DOM click 失败（页面可能刚跳转，重试）/ 未知修饰键 / 选择器语法错 / `web-lib.js` 加载失败 / 截图数据为空 → 各看 msg |
 
 ## 安全规则
 
@@ -223,7 +228,7 @@ UIA：QQ 不暴露控件（`els` 超时 0 个），不要用 `-Marks/-Name`，�
 
 ## 兼容旧脚本
 
-`snap.ps1 / act-bg.ps1 / act.ps1 / mark.ps1 / type.ps1 / info.ps1 / ocr.ps1` 仍可按旧参数调用，内部转发到 `cu.ps1`，输出改为 JSON 格式。v2 原版文件备份在 `win/_v2_backup/`，v3 备份在 `win/_v3_backup/`。
+`snap.ps1 / act-bg.ps1 / act.ps1 / mark.ps1 / type.ps1 / info.ps1 / ocr.ps1` 仍可按旧参数调用，内部转发到 `cu.ps1`，输出改为 JSON 格式（v2/v3 的原始脚本只存在于旧版分享包，本包内没有备份副本）。
 
 ## 截图回传
 

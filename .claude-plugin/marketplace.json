@@ -4,7 +4,7 @@
     {
       "name": "computer-use",
       "source": "./computer-use",
-      "version": "6.0.0",
+      "version": "6.0.1",
       "description": "Windows computer-use primitives for multimodal models: DPI-exact screenshot/click/type, OCR text location, UI Automation control layer, plus a Chrome DevTools Protocol browser layer (cu.exe).",
       "displayName": "Computer Use (Windows)",
       "displayName_i18n": { "zh-CN": "电脑操作技能（Windows）" },
