@@ -1430,20 +1430,40 @@ namespace CU
             IntPtr top = new IntPtr(hwnd);
             if (top != IntPtr.Zero && !EnsureFg(top)) return J.Err("ERR_NOFOCUS", "could not bring target to foreground; nothing sent");
             List<N.INPUT> l = new List<N.INPUT>();
-            foreach (char ch in text.Replace("\r\n", "\n"))
-            {
-                if (ch == '\n') { l.Add(KI(0x0D, 0x1C, 0)); l.Add(KI(0x0D, 0x1C, 2)); }
-                else { l.Add(KI(0, ch, 4)); l.Add(KI(0, ch, 4 | 2)); }
-            }
+            string s = text.Replace("\r\n", "\n");
             int size = Marshal.SizeOf(typeof(N.INPUT));
-            for (int i = 0; i < l.Count; i += 200)
+            int sent = 0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char ch = s[i];
+                if (ch == '\n') { l.Add(KI(0x0D, 0x1C, 0)); l.Add(KI(0x0D, 0x1C, 2)); }
+                else if (char.IsHighSurrogate(ch) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+                {
+                    // surrogate pair (emoji): both KEYEVENTF_UNICODE presses go out before either release, in the
+                    // same SendInput batch, so controls that pair the halves on arrival see one character.
+                    // The old per-code-unit down/up split sent high+up before low+down: strict controls drop it.
+                    char lo = s[++i];
+                    l.Add(KI(0, ch, 4)); l.Add(KI(0, lo, 4));
+                    l.Add(KI(0, ch, 4 | 2)); l.Add(KI(0, lo, 4 | 2));
+                }
+                else { l.Add(KI(0, ch, 4)); l.Add(KI(0, ch, 4 | 2)); }
+                // flush on character boundaries only: a fixed event stride could split a 4-event pair
+                if (l.Count >= 200)
+                {
+                    if (top != IntPtr.Zero && !SameApp(N.GetForegroundWindow(), top))
+                        return J.Err("ERR_FOCUS_LOST", "focus changed while typing; stopped after " + sent + " chars");
+                    N.SendInput((uint)l.Count, l.ToArray(), size);
+                    sent += l.Count;
+                    Thread.Sleep(Pace(5, 10));
+                    l.Clear();
+                }
+            }
+            // sent counts events, not chars - only exact up to the newline/pair factor, good enough for the message
+            if (l.Count > 0)
             {
                 if (top != IntPtr.Zero && !SameApp(N.GetForegroundWindow(), top))
-                    return J.Err("ERR_FOCUS_LOST", "focus changed while typing; stopped after " + (i / 2) + " chars");
-                int n = Math.Min(200, l.Count - i);
-                N.INPUT[] chunk = l.GetRange(i, n).ToArray();
-                N.SendInput((uint)n, chunk, size);
-                Thread.Sleep(Pace(5, 10));
+                    return J.Err("ERR_FOCUS_LOST", "focus changed while typing; stopped after " + sent + " chars");
+                N.SendInput((uint)l.Count, l.ToArray(), size);
             }
             return "{\"ok\":true,\"mode\":\"fg\",\"method\":\"unicode\",\"chars\":" + text.Length + "}";
         }

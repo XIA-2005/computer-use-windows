@@ -42,6 +42,13 @@ if (-not $Blank) {
   $script:chk.Location = New-Object System.Drawing.Point(30, 220)
   $script:chk.Size = New-Object System.Drawing.Size(220, 32)
   $f.Controls.Add($script:chk)
+  # disabled control: cu must refuse with ERR_DISABLED instead of blind-clicking it
+  $script:dis = New-Object System.Windows.Forms.Button
+  $script:dis.Text = "锁定"
+  $script:dis.Location = New-Object System.Drawing.Point(30, 270)
+  $script:dis.Size = New-Object System.Drawing.Size(140, 40)
+  $script:dis.Enabled = $false
+  $f.Controls.Add($script:dis)
 }
 [void]$f.Show()
 [System.Windows.Forms.Application]::Run($f)

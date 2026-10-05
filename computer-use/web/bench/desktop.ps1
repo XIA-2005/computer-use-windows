@@ -1,7 +1,8 @@
 # desktop.ps1 - desktop-layer speed/accuracy regression bench for cu.exe.
 #   Starts web\bench\testwin.ps1 (CU-TEST-WINDOW and CU-TEST-BLANK) in separate processes and drives them
 #   through win\cu.exe: snap / blank-retry / find (cold+cached+fuzzy) / snap -Marks / UIA direct click /
-#   coordinate fallback / settle early-return / type -Verify (bg, clipboard, emoji) / -Fg typing.
+#   coordinate fallback / refusal paths (ERR_DISABLED, ERR_UIA_ACT_FAILED) / settle early-return /
+#   type -Verify (bg, clipboard, emoji) / -Fg typing.
 #   Only the two test windows are touched (the -Fg cases move the cursor and restore it).
 #   usage: powershell -NoProfile -ExecutionPolicy Bypass -File web\bench\desktop.ps1 [-Keep]
 param([switch]$Keep)
@@ -24,7 +25,8 @@ function Stop-Wins() { foreach ($p in $script:procs) { try { Stop-Process -Id $p
 $script:fails = 0
 # build non-ASCII test strings from code points: this file stays pure ASCII (no BOM needed)
 function Cps { param([int[]]$c) return (-join ([char[]]$c)) }
-function Run([string]$name, [string[]]$argv, [scriptblock]$check) {
+# -WantErr: the check EXPECTS ok:false and asserts which err code came back (for refusal paths like ERR_DISABLED)
+function Run([string]$name, [string[]]$argv, [scriptblock]$check, [switch]$WantErr) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $raw = & $cu @argv 2>&1 | Out-String
   $sw.Stop()
@@ -34,7 +36,7 @@ function Run([string]$name, [string[]]$argv, [scriptblock]$check) {
   $verdict = "?"; $note = ""
   if ($null -eq $j) { $verdict = "FAIL"; $note = "unparseable: " + $raw.Trim() }
   else {
-    if ($j.ok -eq $false) { $verdict = "FAIL"; $note = "ERR: $($j.err) $($j.msg)" }
+    if (-not $WantErr -and $j.ok -eq $false) { $verdict = "FAIL"; $note = "ERR: $($j.err) $($j.msg)" }
     else { $r = & $check $j; $verdict = $r[0]; $note = $r[1] }
   }
   if ($verdict -eq "FAIL") { $script:fails++ }
@@ -85,10 +87,11 @@ $m = Run "snap -Marks for element ids" @("snap", "-Title", "CU-TEST-WINDOW", "-M
   param($j) if ($j.ok -and $j.elements.Count -gt 0) { @("ok", "$($j.elements.Count) elements") } else { @("FAIL", "no elements") } }
 $btnId = $null; $editId = $null
 if ($m -and $m.elements) {
-  # the title-bar minimize/maximize/close buttons are Buttons too: pick the largest one (the Save button)
+  # the title-bar minimize/maximize/close buttons are Buttons too: pick the largest enabled one (the Save button)
   $btnArea = 0
   foreach ($e in $m.elements) {
-    if ($e[1] -eq "Button") { $a2 = [int]$e[5] * [int]$e[6]; if ($a2 -gt $btnArea) { $btnArea = $a2; $btnId = [int]$e[0] } }
+    $disabled = ($e.Count -ge 8 -and [int]$e[7] -eq 0)
+    if ($e[1] -eq "Button" -and -not $disabled) { $a2 = [int]$e[5] * [int]$e[6]; if ($a2 -gt $btnArea) { $btnArea = $a2; $btnId = [int]$e[0] } }
     if (-not $editId -and $e[1] -eq "Edit") { $editId = [int]$e[0] }
   }
 }
@@ -100,6 +103,23 @@ if ($btnId) {
   Run "click -Id -Method coord (fallback)" @("click", "-Title", "CU-TEST-WINDOW", "-Id", "$btnId", "-Method", "coord", "-Settle", "600") {
     param($j) if ($j.ok -and $j.method -eq "coord" -and $j.changed -gt 0) { @("ok", "changed=$($j.changed)") } else { @("FAIL", "method=$($j.method) changed=$($j.changed)") } } | Out-Null
 } else { Write-Host "!! button element not found" -ForegroundColor Red; $script:fails++ }
+
+# ---- refusal paths (expected errors) ------------------------------------------
+if ($editId) {
+  # an Edit has no Invoke/Toggle/Select/Expand pattern: -Method uia must REFUSE (no silent coord fallback)
+  Run "click -Id -Method uia (no pattern) refused" @("click", "-Title", "CU-TEST-WINDOW", "-Id", "$editId", "-Method", "uia") {
+    param($j) if ($j.err -eq "ERR_UIA_ACT_FAILED") { @("ok", "$($j.msg)") } else { @("FAIL", "err=$($j.err), want ERR_UIA_ACT_FAILED") } } -WantErr | Out-Null
+}
+$disId = $null
+if ($m -and $m.elements) {
+  foreach ($e in $m.elements) {
+    if (-not $disId -and $e[1] -eq "Button" -and $e.Count -ge 8 -and [int]$e[7] -eq 0) { $disId = [int]$e[0] }
+  }
+}
+if ($disId) {
+  Run "click -Id disabled -> ERR_DISABLED" @("click", "-Title", "CU-TEST-WINDOW", "-Id", "$disId") {
+    param($j) if ($j.err -eq "ERR_DISABLED") { @("ok", "refused instead of blind-clicking") } else { @("FAIL", "err=$($j.err), want ERR_DISABLED") } } -WantErr | Out-Null
+} else { Write-Host "!! disabled button not found in element list" -ForegroundColor Red; $script:fails++ }
 $fw = 0; $fh = 0
 if ($fr -and $fr.ok) { $fw = [int]$fr.frame.w; $fh = [int]$fr.frame.h }
 if ($fw -gt 100) {

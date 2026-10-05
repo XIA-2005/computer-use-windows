@@ -260,7 +260,17 @@ function Find-ByName($a) {
   $b['Find'] = $q; $b.Remove('FindB64')
   try { $hit = Find-Text $b }
   catch { Fail "ERR_TEXT_NOT_FOUND" ("'" + $q + "' not found: UIA " + $st + " (" + $l.Count + " elements), OCR no match") }
-  return @{ x = $hit.cx; y = $hit.cy; screen = ($script:ocrSpace -eq 'screen'); el = $null; note = ',"via":"ocr","uia":' + (Q ($st + "/" + $l.Count)) + ',"match":' + (Q $hit.match) + ',"found":' + (Q $hit.text) }
+  # same hit_box/alts payload as the -Find path: choosing another candidate must not cost a second OCR round
+  $note = ',"via":"ocr","uia":' + (Q ($st + "/" + $l.Count)) + ',"match":' + (Q $hit.match) + ',"found":' + (Q $hit.text) + ',"hit_box":' + (HitBoxJson $hit)
+  $alts = @(); $na = 0
+  foreach ($h2 in @($hit.all)) {
+    $na++
+    if ($na -eq $i) { continue }
+    $alts += (HitJson $h2)
+    if ($alts.Count -ge 4) { break }
+  }
+  if ($alts.Count) { $note += ',"alts":[' + ($alts -join ',') + ']' }
+  return @{ x = $hit.cx; y = $hit.cy; screen = ($script:ocrSpace -eq 'screen'); el = $null; note = $note }
 }
 # frame-coordinate click: if an element list exists for this frame, keep points inside an element,
 # pull near-misses (within ~6 image px) onto the nearest control's centre
@@ -707,7 +717,18 @@ function Invoke-Cu($a) {
         if ($null -ne $r) {
           $j = '{"ok":true,"mode":"bg","act":"click","method":"uia","via":' + (Q $r) + ',"el":' + (ElJson $el) + '}'
           $ctx.note = ""
+        } elseif ($st -eq 'disabled') {
+          # live check overrides a stale cached "enabled": refuse instead of blind-clicking through the fallback
+          return (Err "ERR_DISABLED" ("element #" + $el.id + " (" + $el.type + " " + $el.name + ") is disabled (live UIA check) - not clicking"))
+        } elseif ($st -eq 'timeout' -or $st -eq 'busy' -or $st -eq 'busy-zombie') {
+          # outcome unknown - the pattern may still fire a moment later, so re-clicking by coordinate could fire it twice.
+          # Report pending + let settle/changed verify decide; never fall through to the coordinate click here.
+          $j = '{"ok":true,"mode":"bg","act":"click","method":"uia-pending","el":' + (ElJson $el) + ',"warn":' + (Q ("UIA action did not confirm within 800ms (status: " + $st + "); it may still take effect - check the after frame, do not re-click this control")) + '}'
+          $ctx.note = ""
+        } elseif ($um -eq 'uia') {
+          return (Err "ERR_UIA_ACT_FAILED" ("UIA action failed for element #" + $el.id + " (" + $el.type + " " + $el.name + "): " + $st + " - retry with -Method coord or -Fg"))
         }
+        # auto + not-found / no-pattern / window-gone / error: fall back to the coordinate click below
       }
       if ($null -eq $j) {
         if ($fg) {
@@ -777,7 +798,7 @@ function Invoke-Cu($a) {
           if (IsErr $pr) { $j = $pr; break }
           $j = $pr
           $sw2 = [Diagnostics.Stopwatch]::StartNew()
-          while ($sw2.ElapsedMilliseconds -lt 220) {
+          while ($sw2.ElapsedMilliseconds -lt 150) {
             if ($script:verifyIsEdit) {
               $vt = [CU.Core]::TextOf($tgt)
               if ($null -ne $vt -and (Norm $vt).Contains((Norm $t))) { $landed = $true; break }

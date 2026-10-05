@@ -1148,21 +1148,31 @@ namespace CU
             bool off = BN(v3.ContainsKey("offscreen") ? v3["offscreen"] : null);
             d["verified"] = hit;
             if (!hit && v3.ContainsKey("cover")) d["cover"] = v3["cover"];
+            if (hit) return;
             // a layout shift moved the element after we located it: one single retry is safe. A merely covered
             // point is NOT retried - the second click would land on whatever covers it (often a just-opened modal).
-            if (hit || !present || !moved || off || method != "auto" || dbl || button != "left") return;
-            Dictionary<string, object> d4;
-            if (LibEval(b, LocateExpr(LocQ(sel, text, index, exact, id, false), "", true), 6000, out d4) != null) return;
-            if (!BN(d4.ContainsKey("hit") ? d4["hit"] : null) || !Frames(d4)) return;
-            string me = DispatchMouse(b, DN(d4, "x"), DN(d4, "y"), button, false);
-            if (me != null) return;
-            d["retried"] = true;
-            Dictionary<string, object> d5;
-            if (LibEval(b, "({ok:true,v:__cu.check(__cu.last)})", 2500, out d5) == null)
+            bool retryable = present && moved && !off && method == "auto" && !dbl && button == "left";
+            if (retryable)
             {
-                Dictionary<string, object> v5 = d5.ContainsKey("v") ? d5["v"] as Dictionary<string, object> : null;
-                if (v5 != null) d["verified"] = BN(v5.ContainsKey("hit") ? v5["hit"] : null);
+                Dictionary<string, object> d4;
+                if (LibEval(b, LocateExpr(LocQ(sel, text, index, exact, id, false), "", true), 6000, out d4) == null &&
+                    BN(d4.ContainsKey("hit") ? d4["hit"] : null) && Frames(d4))
+                {
+                    string me = DispatchMouse(b, DN(d4, "x"), DN(d4, "y"), button, false);
+                    if (me != null) return;
+                    d["retried"] = true;
+                    Dictionary<string, object> d5;
+                    if (LibEval(b, "({ok:true,v:__cu.check(__cu.last)})", 2500, out d5) == null)
+                    {
+                        Dictionary<string, object> v5 = d5.ContainsKey("v") ? d5["v"] as Dictionary<string, object> : null;
+                        if (v5 != null) d["verified"] = BN(v5.ContainsKey("hit") ? v5["hit"] : null);
+                    }
+                }
+                if (!BN(d["verified"]))
+                    d["warn"] = "click did not land on the target even after one re-locate + retry: the point is covered or the page keeps moving - verify the result before continuing";
+                return;
             }
+            d["warn"] = "click point no longer hits the target element (verified=false; not retried - covered, off-screen, or a static miss): verify the result before continuing";
         }
 
         public static string ClickXY(string b, double x, double y, string button)
@@ -1433,7 +1443,8 @@ namespace CU
             if (nonAscii)
             {
                 string res;
-                return CoreCall(b, true, "Input.insertText", "{\"text\":" + J.Q(tok) + "}", 4000, out res);
+                // no timeout resend (same policy as Runtime.evaluate): a late ack means the text may already be in
+                return CoreCallEx(b, true, "Input.insertText", "{\"text\":" + J.Q(tok) + "}", 4000, false, out res);
             }
             string[] parts = tok.Split('+');
             int mods = 0;
@@ -1499,9 +1510,9 @@ namespace CU
                 if (e != null) return e;
                 return InputCall(b, "Input.dispatchKeyEvent", SendKeyJson("keyUp", vk, key, code, mods, null));
             }
-            // unknown multi-char token: insert as text
+            // unknown multi-char token: insert as text (no timeout resend - see above)
             string r2;
-            return CoreCall(b, true, "Input.insertText", "{\"text\":" + J.Q(tok) + "}", 4000, out r2);
+            return CoreCallEx(b, true, "Input.insertText", "{\"text\":" + J.Q(tok) + "}", 4000, false, out r2);
         }
 
         // optional -Sel/-Id focuses the target first, so the keys land where intended

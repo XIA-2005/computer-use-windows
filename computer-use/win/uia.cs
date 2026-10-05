@@ -321,6 +321,20 @@ namespace CU
         public static string Act(long hwnd, string type, string name, int l, int t, int r, int b, int timeoutMs, out string status)
         {
             string res = null, st = "none";
+            long now = Environment.TickCount;
+            // share the zombie guard with Collect: a timed-out Act left its worker thread (and a hung UIA COM
+            // call) behind; without accounting these could pile up unboundedly in the long-running daemon
+            if (activeWalks > 0)
+            {
+                bool stale = unchecked(now - lastWalkStart) > ZombieMs;
+                if (!stale || activeWalks >= MaxWalks)
+                {
+                    status = stale ? "busy-zombie" : "busy";
+                    return null;
+                }
+            }
+            Interlocked.Increment(ref activeWalks);
+            lastWalkStart = now;
             Thread th = new Thread(delegate ()
             {
                 try
@@ -368,6 +382,7 @@ namespace CU
                     st = res != null ? "ok" : "no-pattern";
                 }
                 catch (Exception e) { st = "error: " + e.GetType().Name + " " + e.Message; }
+                finally { Interlocked.Decrement(ref activeWalks); }
             });
             th.IsBackground = true;
             th.SetApartmentState(ApartmentState.MTA);
