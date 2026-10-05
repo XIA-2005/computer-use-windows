@@ -1,0 +1,5 @@
+# The prebuilt core DLL (computer-use/win/bin/cu-<hash>.dll) is keyed on the *bytes* of the C# sources
+# (cu.cs + uia.cs + web.cs). Pin their checkout form so the committed DLL matches on every machine -
+# without this, a CRLF checkout (git on Windows defaults to core.autocrlf=true) re-keys the hash and
+# every fresh clone pays the 3-8 s first-run compile.
+computer-use/win/*.cs text eol=crlf
