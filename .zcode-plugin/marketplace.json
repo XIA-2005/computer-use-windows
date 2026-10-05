@@ -1,0 +1,17 @@
+{
+  "name": "computer-use-windows",
+  "plugins": [
+    {
+      "name": "computer-use",
+      "source": "./computer-use",
+      "version": "6.0.0",
+      "description": "Windows computer-use primitives for multimodal models: DPI-exact screenshot/click/type, OCR text location, UI Automation control layer, plus a Chrome DevTools Protocol browser layer (cu.exe).",
+      "displayName": "Computer Use (Windows)",
+      "displayName_i18n": { "zh-CN": "电脑操作技能（Windows）" },
+      "description_i18n": {
+        "zh-CN": "Windows 电脑操作原语工具包：截图给多模态模型直接看、DPI 精确点击/输入、OCR 找字、UI Automation 控件级操作，附 Chrome DevTools Protocol 浏览器层（cu.exe）。"
+      },
+      "category": "developer-tools"
+    }
+  ]
+}

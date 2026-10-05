@@ -2,7 +2,7 @@
 state/
 shots/
 # compiled C# cache, rebuilt on first run
-win/bin/
+**/win/bin/
 # local backups of previous versions
-win/_v*_backup/
+**/win/_v*_backup/
 *.tmp

@@ -1,4 +1,11 @@
+---
+name: computer-use
+description: 操作 Windows 桌面应用与专用浏览器实例的原语工具包：截图给多模态模型直接看、DPI 精确点击/输入/OCR 找字（cu.exe），附 Chrome DevTools Protocol 浏览器层（DOM 级定位点击，不截图、不动日常浏览器）。当需要在本机自动化 GUI 或浏览器任务、截图验证界面状态、精确点击输入、读取屏幕文字时使用。
+---
+
 # Computer Use Skill — Windows v6（快 + 准 + 浏览器 CDP）
+
+> **路径基准**：本文件位于分享包 / ZCode 插件的 `skills\computer-use\` 下。下文提到的 `win\`、`web\`、`state\` 一律相对于**分享包 / 插件根**（即本文件所在目录的上两级）；`cu.exe` 的完整相对路径 = 本技能目录的 `..\..\win\cu.exe`。
 
 > 定位：与具体应用无关的 Windows Computer Use 原语。截图交给**原生多模态模型直接看**，模型输出图上坐标，脚本负责把坐标**精确**映射回屏幕并注入。ShunCode 本体零改动。
 > v6（2026-09-26）：**浏览器层重做**——文字定位引擎（剪枝 DFS：嵌套按钮/aria-label/title/placeholder/label/alt 都能按字找，穿透 open shadow DOM 与同源 iframe，隐藏元素靠后，返回 `count/alts` 提示歧义）；默认**真实鼠标点击**（move→press→release，先做命中测试，被遮挡自动退回 DOM click 并 `warn`）；`web els` 编号元素 + `-Id`、`web shot -Marks` 编号截图、`web find`、`web hover`、`web scroll`；`type` 发标准 InputEvent + keyup，contenteditable 走可信 `Input.insertText`（富文本编辑器可用），`-Method keys`；`wait` 改为页内 MutationObserver（元素一出现立刻返回）+ `-Stable`；`shot` 由浏览器按比例直接输出（不再解码重编码，快 2–3 倍）；同 URL 重开也能正确等待，`open` 返回 `title`/`ready`（load 事件被慢资源拖住时按 `interactive` 返回可用页面而不是超时）；`type` 默认走**可信输入**（`Input.insertText`，页面看到的和真人打字一样，Enter 能提交必应这类监听状态的搜索框）；点开 `target=_blank` 链接会**自动跟到新标签**；会话标签跑到后台时自动激活（后台标签没有帧、按键会被忽略）；每条命令不再做 HTTP 探活、常驻进程不再每次 Full GC；专用实例带 `--disable-backgrounding-occluded-windows` 等参数（窗口被挡住时鼠标事件不再卡 4 秒，**旧实例需 `web stop` 一次**）。**桌面层同轮优化**：OCR 改为内存直通（不再写读 PNG，`find` 642→~450ms，带 `-Region` ~150ms），画面没变时直接复用上次 OCR 结果（`wait -Find` 轮询、同一屏多次 `find` 几乎零成本，返回 `cached:true`）；`-Title/-Proc` 3 秒内复用已解析的窗口、进程名缓存 1 分钟（`snap` 275→150ms，`info` 113→48ms）；缩图改 HighQualityBilinear。基准：`web\bench\bench.ps1`（本地页）+ `web\bench\sites.ps1`（真实站点，Edge/Chrome 双实例）。
@@ -16,9 +23,9 @@
 ## 调用方式
 
 ```bash
-CU='"<安装路径>\computer-use\win\cu.exe"'      # 推荐：快（路径按你的解压位置改，含空格也可以）
+CU='"<本技能目录>\..\..\win\cu.exe"'      # 推荐：快（<本技能目录> = 本 SKILL.md 所在目录；cu.exe 固定在插件根的 win\ 下）
 $CU <cmd> [参数]        # 每条命令只输出一行 JSON；ok:false 时退出码 1
-# 兼容/兜底：powershell -NoProfile -ExecutionPolicy Bypass -File "<安装路径>\computer-use\win\cu.ps1" <cmd> [参数]
+# 兼容/兜底：powershell -NoProfile -ExecutionPolicy Bypass -File "<本技能目录>\..\..\win\cu.ps1" <cmd> [参数]
 ```
 
 - `cu.exe` 参数与 `cu.ps1` 完全相同。它把命令交给后台常驻的 `cu.ps1 serve`（命名管道，仅当前用户可连），省掉每次启动 PowerShell + 加载 DLL 的 ~500ms。第一次调用会自动拉起常驻进程（约 1–2 秒），空闲 20 分钟自动退出（`CU_IDLE=分钟`）。改了 `cu.ps1/cu.cs/uia.cs` 会自动换新进程。

@@ -1,6 +1,6 @@
 # Computer Use Skill（Windows v6）— 分享包说明
 
-这是一个和具体应用无关的 Windows「电脑操作」原语工具包：截图给多模态模型看、模型报坐标、脚本精确点击/输入；另带一套走 Chrome DevTools Protocol 的浏览器层（不截图、不动鼠标，直接在页面里定位元素、注入可信的鼠标键盘事件）。完整用法见 `SKILL.md`（写给模型/使用者看的手册，命令、参数、错误码、实测数据都在里面）。
+这是一个和具体应用无关的 Windows「电脑操作」原语工具包：截图给多模态模型看、模型报坐标、脚本精确点击/输入；另带一套走 Chrome DevTools Protocol 的浏览器层（不截图、不动鼠标，直接在页面里定位元素、注入可信的鼠标键盘事件）。完整用法见 `computer-use/skills/computer-use/SKILL.md`（写给模型/使用者看的手册，命令、参数、错误码、实测数据都在里面）。
 
 ## 环境要求
 - Windows 10/11 x64，PowerShell 5.1（系统自带），.NET Framework 4.x（系统自带，首次运行用它的 csc 编译 C# 核心，约 3–8 秒）。
@@ -8,6 +8,10 @@
 - 不需要安装任何东西，不需要管理员权限。
 
 ## 安装
+
+**方式一：ZCode 插件市场（推荐）**——本仓库同时是一个 ZCode 插件市场。在 ZCode 里打开「插件市场 → 添加 → 添加插件市场」，粘贴本仓库地址（GitHub：`https://github.com/XIA-2005/computer-use-windows`；本地测试可直接粘贴仓库目录），添加后在「个人」里安装 **Computer Use (Windows)**，技能由 ZCode 统一加载与更新，无需手动拷贝文件。
+
+**方式二：手动解压**
 1. 把整个 `computer-use` 文件夹解压到任意位置（路径里有空格也可以）。
 2. 打开 PowerShell 或 cmd，运行一次：
    ```
@@ -21,8 +25,9 @@
    ```
    它会启动一个**专用的**浏览器实例（独立用户目录 `state\web\`，不碰你日常的浏览器窗口和登录态）。
 
-## 目录
-- `SKILL.md` — 手册（给模型读的那份也是它）。
+## 目录（以 `computer-use/` 插件文件夹为根）
+- `skills\computer-use\SKILL.md` — 手册（给模型读的那份也是它；顶部含 ZCode 技能 frontmatter）。
+- `.zcode-plugin\plugin.json` — ZCode 插件清单（技能入口指向 `skills\`）。
 - `win\` — 全部代码：`cu.exe`（快速入口）、`cu.ps1`（分发）、`cu.cs`/`uia.cs`/`web.cs`（C# 核心，首次运行自动编译到 `win\bin\`）、`web-lib.js`（浏览器页内助手，改了即时生效）。
 - `web\bench\` — 基准与真实站点测试脚本（`bench.ps1`、`sites.ps1`）和 2026-09-26 的测试报告。
 - `state\` — 运行时状态（截图、帧文件、浏览器专用用户目录），自动生成；分享包里是空的。
