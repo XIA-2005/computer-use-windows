@@ -17,6 +17,8 @@ using System.Management;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -62,7 +64,30 @@ namespace CU
             return "";
         }
 
-        public static int Port(string b) { return b == "chrome" ? 9461 : 9462; }
+        // Default profile retains the v6.1 ports. An explicit CU_SESSION
+        // gets its own deterministic port/profile/target/frame, so separate
+        // tasks cannot silently navigate one another's browser tabs.
+        static string SessionSuffix()
+        {
+            string s = (Environment.GetEnvironmentVariable("CU_SESSION") ?? "").Trim();
+            if (s == "") return "";
+            using (SHA256 hash = SHA256.Create())
+            {
+                byte[] h = hash.ComputeHash(Encoding.UTF8.GetBytes(s));
+                return BitConverter.ToString(h, 0, 8).Replace("-", "").ToLowerInvariant();
+            }
+        }
+        public static int Port(string b)
+        {
+            string suffix = SessionSuffix();
+            if (suffix == "") return b == "chrome" ? 9461 : 9462;
+            using (SHA256 hash = SHA256.Create())
+            {
+                byte[] h = hash.ComputeHash(Encoding.UTF8.GetBytes(b + ":" + suffix));
+                uint n = ((uint)h[0] << 24) | ((uint)h[1] << 16) | ((uint)h[2] << 8) | h[3];
+                return 20000 + (int)(n % 30000); // collision => explicit ERR_PORT_CONFLICT, never attach
+            }
+        }
 
         static string StateDir()
         {
@@ -74,9 +99,10 @@ namespace CU
         }
 
         static string WebDir() { return Path.Combine(StateDir(), "web"); }
-        static string ProfileDir(string b) { return Path.Combine(WebDir(), b); }
-        static string LastWeb() { return Path.Combine(StateDir(), "last.web.json"); }
-        static string TargetFile(string b) { return Path.Combine(WebDir(), b + ".target"); }
+        static string BrowserKey(string b) { string s = SessionSuffix(); return s == "" ? b : b + "-" + s; }
+        static string ProfileDir(string b) { return Path.Combine(WebDir(), BrowserKey(b)); }
+        static string LastWeb() { string s = SessionSuffix(); return Path.Combine(StateDir(), s == "" ? "last.web.json" : "last.web-" + s + ".json"); }
+        static string TargetFile(string b) { return Path.Combine(WebDir(), BrowserKey(b) + ".target"); }
 
         static string LoadTarget(string b)
         {
@@ -196,27 +222,91 @@ namespace CU
             catch { return ""; }
         }
 
+        // Verify the actual TCP LISTENING owner's PID, not merely that some
+        // process responds with Chromium /json/version on our fixed port.
+        // MIB_TCPROW_OWNER_PID is 24 bytes; IPv4 table class OWNER_PID_LISTENER.
+        [DllImport("iphlpapi.dll", SetLastError = true)]
+        static extern uint GetExtendedTcpTable(IntPtr table, ref int length, bool order, int family, int tcpTableClass, uint reserved);
+
+        static int ListenerPid(int port)
+        {
+            int bytes = 0;
+            uint first = GetExtendedTcpTable(IntPtr.Zero, ref bytes, false, 2, 3, 0);
+            if ((first != 122 && first != 0) || bytes < 4 || bytes > 16 * 1024 * 1024) return -1;
+            IntPtr buf = Marshal.AllocHGlobal(bytes);
+            try
+            {
+                if (GetExtendedTcpTable(buf, ref bytes, false, 2, 3, 0) != 0) return -1;
+                int count = Marshal.ReadInt32(buf);
+                if (count < 0 || count > (bytes - 4) / 24) return -1;
+                for (int i = 0; i < count; i++)
+                {
+                    int offset = 4 + i * 24;
+                    if (Marshal.ReadInt32(buf, offset) != 2) continue; // LISTEN
+                    int raw = Marshal.ReadInt32(buf, offset + 8);
+                    int localPort = ((raw & 255) << 8) | ((raw >> 8) & 255);
+                    if (localPort != port) continue;
+                    uint addr = unchecked((uint)Marshal.ReadInt32(buf, offset + 4));
+                    if (addr == 0x0100007f || addr == 0) return Marshal.ReadInt32(buf, offset + 20);
+                }
+                return 0;
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        static bool OwnsListener(string b, int pid)
+        {
+            if (pid <= 0) return false;
+            try
+            {
+                string expectedExe = Path.GetFullPath(ExeOf(b));
+                string expectedProfile = Path.GetFullPath(ProfileDir(b)).TrimEnd('\\');
+                using (ManagementObjectSearcher q = new ManagementObjectSearcher(
+                    "SELECT Name,ExecutablePath,CommandLine FROM Win32_Process WHERE ProcessId=" +
+                    pid.ToString(CultureInfo.InvariantCulture)))
+                using (ManagementObjectCollection procs = q.Get())
+                {
+                    foreach (ManagementObject proc in procs)
+                    {
+                        string cmd = Convert.ToString(proc["CommandLine"]) ?? "";
+                        string exe = Convert.ToString(proc["ExecutablePath"]) ?? "";
+                        if (!string.Equals(Path.GetFullPath(exe), expectedExe, StringComparison.OrdinalIgnoreCase)) continue;
+                        Match mp = Regex.Match(cmd, @"(?:^|\s)--remote-debugging-port=(\d+)(?=\s|$)", RegexOptions.IgnoreCase);
+                        if (!mp.Success || mp.Groups[1].Value != Port(b).ToString(CultureInfo.InvariantCulture)) continue;
+                        Match mf = Regex.Match(cmd, "(?:^|\\s)--user-data-dir=(?:\\\"([^\\\"]+)\\\"|(\\S+))", RegexOptions.IgnoreCase);
+                        if (!mf.Success) continue;
+                        string actualProfile = mf.Groups[1].Success ? mf.Groups[1].Value : mf.Groups[2].Value;
+                        if (string.Equals(Path.GetFullPath(actualProfile).TrimEnd('\\'), expectedProfile,
+                                          StringComparison.OrdinalIgnoreCase)) return true;
+                    }
+                }
+            }
+            catch { } // fail closed on missing process info / inaccessible WMI
+            return false;
+        }
+
+        static string ListenerError(string b)
+        {
+            int pid = ListenerPid(Port(b));
+            if (pid < 0) return J.Err("ERR_BROWSER_IDENTITY", "cannot inspect TCP listener ownership; refusing to attach");
+            if (pid > 0 && !OwnsListener(b, pid))
+                return J.Err("ERR_PORT_CONFLICT", "CDP port " + Port(b) + " belongs to a different browser/process (pid " + pid + "); refusing to attach");
+            return null;
+        }
+
         public static bool Running(string b)
         {
             b = Norm(b);
             if (b == "") return false;
-            // fast path: an open browser socket that answered recently is proof enough (no TCP/HTTP probe per command)
+            // Fast path only for our previously verified live WebSocket.
             lock (_lk)
             {
                 Conn c0;
                 if (_conns.TryGetValue(b, out c0) && c0.ws != null && c0.ws.State == WebSocketState.Open &&
                     unchecked(Environment.TickCount - c0.lastOk) < 15000) return true;
             }
-            try
-            {
-                using (TcpClient t = new TcpClient())
-                {
-                    IAsyncResult ar = t.BeginConnect("127.0.0.1", Port(b), null, null);
-                    if (!ar.AsyncWaitHandle.WaitOne(300)) return false;
-                    t.EndConnect(ar);
-                }
-            }
-            catch { return false; }
+            int pid = ListenerPid(Port(b));
+            if (pid <= 0 || !OwnsListener(b, pid)) return false;
             string v = HttpGet(Port(b), "/json/version", 800);
             return v.Contains("webSocketDebuggerUrl");
         }
@@ -249,6 +339,8 @@ namespace CU
             if (_conns.TryGetValue(b, out c) && c.ws != null && c.ws.State == WebSocketState.Open)
                 return c;
             if (c != null) { try { if (c.ws != null) c.ws.Dispose(); } catch { } _conns.Remove(b); }
+            string identityError = ListenerError(b);
+            if (identityError != null) { err = identityError; return null; }
             if (!Running(b)) { err = J.Err("ERR_NOT_RUNNING", b + " is not running (web start)"); return null; }
             string ver = HttpGet(Port(b), "/json/version", 1500);
             Match m = Regex.Match(ver, "\"webSocketDebuggerUrl\"\\s*:\\s*\"([^\"]+)\"");
@@ -520,6 +612,8 @@ namespace CU
             b = Norm(b);
             if (b == "") return J.Err("ERR_ARGS", "-Browser must be edge or chrome");
             int port = Port(b);
+            string identityError = ListenerError(b);
+            if (identityError != null) return identityError;
             if (Running(b))
                 return "{\"ok\":true,\"browser\":" + J.Q(b) + ",\"port\":" + port + ",\"running\":true,\"started\":false}";
             string exe = ExeOf(b);
@@ -527,10 +621,11 @@ namespace CU
             string prof = ProfileDir(b);
             try { Directory.CreateDirectory(prof); } catch (Exception e) { return J.Err("ERR_PROFILE", e.Message); }
             if (string.IsNullOrEmpty(url)) url = "about:blank"; else url = NormalizeUrl(url);
-            string args = "--remote-debugging-port=" + port.ToString(CultureInfo.InvariantCulture) +
+            string args = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=" + port.ToString(CultureInfo.InvariantCulture) +
                 " --user-data-dir=" + ArgQ(prof) +
                 " --no-first-run --no-default-browser-check --disable-session-crashed-bubble --hide-crash-restore-bubble" +
                 " --disable-sync" +
+                (Environment.GetEnvironmentVariable("CU_HEADLESS") == "1" ? " --headless=new --disable-gpu" : "") +
                 // keep frames flowing while the window sits behind other windows: CDP mouse/wheel input is rAF-aligned and
                 // would otherwise stall for seconds (verified 2026-09-26: occluded window -> document.hidden, no rAF)
                 " --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling" +
@@ -540,13 +635,18 @@ namespace CU
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo(exe, args);
-                psi.UseShellExecute = false;
+                // A long-lived browser must not inherit the caller's stdout
+                // or stderr pipe: otherwise Bash $(cu.exe web start) can hang
+                // until the browser is closed even after the JSON reply.
+                psi.UseShellExecute = true;
                 p = Process.Start(psi);
             }
             catch (Exception e) { return J.Err("ERR_START", e.Message); }
             Stopwatch sw = Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 12000)
             {
+                identityError = ListenerError(b);
+                if (identityError != null) return identityError;
                 if (Running(b))
                 {
                     lock (_lk)
@@ -554,7 +654,7 @@ namespace CU
                         Conn c;
                         if (_conns.TryGetValue(b, out c)) { try { if (c.ws != null) c.ws.Dispose(); } catch { } _conns.Remove(b); }
                     }
-                    try { Directory.CreateDirectory(WebDir()); File.WriteAllText(Path.Combine(WebDir(), b + ".pid"), p.Id.ToString(CultureInfo.InvariantCulture)); }
+                    try { Directory.CreateDirectory(WebDir()); File.WriteAllText(Path.Combine(WebDir(), BrowserKey(b) + ".pid"), p.Id.ToString(CultureInfo.InvariantCulture)); }
                     catch { }
                     return "{\"ok\":true,\"browser\":" + J.Q(b) + ",\"port\":" + port + ",\"pid\":" + p.Id +
                            ",\"running\":true,\"started\":true,\"ms\":" + sw.ElapsedMilliseconds + "}";
@@ -582,7 +682,12 @@ namespace CU
                 {
                     foreach (ManagementObject o in set)
                     {
-                        try { ids.Add((uint)o["ProcessId"]); } catch { }
+                        try
+                        {
+                            int id = Convert.ToInt32(o["ProcessId"]);
+                            if (OwnsListener(b, id)) ids.Add((uint)id);
+                        }
+                        catch { }
                     }
                 }
             }
@@ -594,6 +699,8 @@ namespace CU
         {
             b = Norm(b);
             if (b == "") return J.Err("ERR_ARGS", "-Browser must be edge or chrome");
+            string identityError = ListenerError(b);
+            if (identityError != null) return identityError; // never kill another process on our port
             lock (_lk)
             {
                 Conn c;
@@ -619,6 +726,8 @@ namespace CU
         {
             b = Norm(b);
             if (b == "") return J.Err("ERR_ARGS", "-Browser must be edge or chrome");
+            string identityError = ListenerError(b);
+            if (identityError != null) return identityError;
             StringBuilder sb = new StringBuilder(512);
             sb.Append("{\"ok\":true,\"browser\":").Append(J.Q(b))
               .Append(",\"port\":").Append(Port(b))
@@ -629,7 +738,7 @@ namespace CU
             if (!run) return sb.Append("}").ToString();
             try
             {
-                string pf = Path.Combine(WebDir(), b + ".pid");
+                string pf = Path.Combine(WebDir(), BrowserKey(b) + ".pid");
                 if (File.Exists(pf)) sb.Append(",\"pid\":").Append(File.ReadAllText(pf).Trim());
             }
             catch { }

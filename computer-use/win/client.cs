@@ -53,6 +53,8 @@ static class CuClient
     static string PipeName(string ps1)
     {
         StringBuilder k = new StringBuilder(Environment.UserName.ToLowerInvariant());
+        foreach (string name in new string[] { "CU_STATE", "CU_SESSION", "CU_FG_AUTO", "CU_SLOW", "CU_SETTLE_QUIET", "CU_HEADLESS" })
+            k.Append("|").Append(name).Append("=").Append(Environment.GetEnvironmentVariable(name) ?? "");
         foreach (string f in new string[] { "cu.ps1", "cu.cs", "uia.cs", "web.cs" })
         {
             string p = Path.Combine(Here, f);
@@ -105,6 +107,20 @@ static class CuClient
     static void StartDaemon(string ps1, string pipe)
     {
         string cmd = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + ps1 + "\" serve -Pipe " + pipe;
+        // WMI does not inherit the caller's environment. Explicitly forward
+        // session and private state to keep the resident fast path isolated.
+        string state = Environment.GetEnvironmentVariable("CU_STATE");
+        string session = Environment.GetEnvironmentVariable("CU_SESSION");
+        if (!string.IsNullOrEmpty(state)) cmd += " -StateDir " + Quote(state);
+        if (!string.IsNullOrEmpty(session)) cmd += " -Session " + Quote(session);
+        string fgAuto = Environment.GetEnvironmentVariable("CU_FG_AUTO");
+        string slow = Environment.GetEnvironmentVariable("CU_SLOW");
+        string quiet = Environment.GetEnvironmentVariable("CU_SETTLE_QUIET");
+        string headless = Environment.GetEnvironmentVariable("CU_HEADLESS");
+        if (!string.IsNullOrEmpty(fgAuto)) cmd += " -EnvFgAuto " + Quote(fgAuto);
+        if (!string.IsNullOrEmpty(slow)) cmd += " -EnvSlow " + Quote(slow);
+        if (!string.IsNullOrEmpty(quiet)) cmd += " -EnvQuiet " + Quote(quiet);
+        if (!string.IsNullOrEmpty(headless)) cmd += " -EnvHeadless " + Quote(headless);
         // a mutex keeps concurrent clients from starting several daemons
         using (Mutex mx = new Mutex(false, "Local\\" + pipe + "-start"))
         {
@@ -163,12 +179,16 @@ static class CuClient
         psi.StandardOutputEncoding = new UTF8Encoding(false);
         using (Process p = Process.Start(psi))
         {
-            string o = p.StandardOutput.ReadToEnd();
-            p.WaitForExit();
+            // A launched Edge/Chrome process may inherit stdout's write handle.
+            // ReadToEnd then waits for the entire browser lifetime even after
+            // cu.ps1 has already produced its single JSON response.
+            string line = p.StandardOutput.ReadLine();
+            if (line == null) line = "{\"ok\":false,\"err\":\"ERR_DAEMON\",\"msg\":\"direct CLI returned no JSON\"}";
+            p.WaitForExit(3000);
             Stream so = Console.OpenStandardOutput();
-            byte[] b = new UTF8Encoding(false).GetBytes(o);
+            byte[] b = new UTF8Encoding(false).GetBytes(line + "\n");
             so.Write(b, 0, b.Length); so.Flush();
-            return p.ExitCode;
+            return line.StartsWith("{\"ok\":false") ? 1 : 0;
         }
     }
 }

@@ -33,6 +33,14 @@ set CU="<技能目录>\..\..\win\cu.exe"
 - 常驻进程不可用时自动回退为直接运行 `cu.ps1`；`CU_NODAEMON=1` 强制不用常驻；`cu.exe --stop` 手动停止（改环境变量后需要它才能生效，见「环境变量」）。
 - 首次运行会用 .NET 自带 csc 把 `cu.cs + uia.cs + web.cs` 编译到 `win/bin/cu-<hash>.dll`（约 3–8 秒，之后不再重复；包内已带预编译 DLL，hash 不匹配才会现场编译）。状态文件默认在 `computer-use/state/`（可用环境变量 `CU_STATE` 改）。
 
+## v6.1 安全补丁（CDP 身份与任务隔离）
+
+- CDP 端口不再仅凭 `/json/version` 判定实例身份：实际 TCP 监听 PID、浏览器可执行文件、`--remote-debugging-port` 和 `--user-data-dir` 必须全部匹配。端口被其它进程占用时返回 `ERR_PORT_CONFLICT`，`web start/status/stop` 都不会连接或关闭该进程；无法核验返回 `ERR_BROWSER_IDENTITY`。
+- 默认无 `CU_SESSION` 时仍使用 Edge 9462 / Chrome 9461，兼容 v6.1 登录状态。需要同时开展多个 GUI/CDP 任务时，给每个任务设置**稳定且不同**的 `CU_SESSION`（例如 `export CU_SESSION='project-task-001'`），每个会话单独使用专用 profile、CDP 端口、标签、帧缓存和常驻服务。任务内所有命令均保留相同标识。一个任务结束时仅停止自己会话的 `web stop`，不要停止别人的实例。
+- `CU_SESSION` 产生的端口是确定性的 20000–49999；哈希碰撞或端口占用会明确拒绝，改换会话 ID 后重试。相同会话 ID 的并发命令仍共享浏览器与状态，不保证原子事务；不同任务不要复用同一标识。`CU_HEADLESS=1` 仅供回归测试时启动无头专用浏览器。
+- 常驻客户端通过 WMI 显式传递 `CU_STATE` / `CU_SESSION` 和环境相关设置，恢复了命名管道的快速模式，不必再强制 `CU_NODAEMON=1`。使用环境变量区分任务会话时，服务管道也自动隔离。
+- 回归：在 Windows Git Bash 中运行 `bash web/bench/security-isolation-e2e.sh`；脚本只启动独立无头测试 profile，检查网页操作、会话隔离、外部端口占用拒绝。
+
 ## 选路决策树（先选对路子，再动手）
 
 1. 目标在**专用浏览器**里（或就是要开网页）→ 走 `web` 层：`-Id`（`web els` 编号）≈ `-Sel` > `-Text`（`-TextB64` 同义）> `web shot` 坐标。不截图、不 OCR，45–85ms/条。

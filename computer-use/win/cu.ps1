@@ -27,13 +27,27 @@ param(
   [switch]$NoSnapTo, [switch]$Verify, [int]$Quiet = 250, [string]$Pipe, [int]$Idle = 0,
   [string]$Sel, [string]$Js, [string]$Url, [string]$Browser = "edge",
   [switch]$NewTab, [switch]$Full, [switch]$Ready, [switch]$Append, [switch]$Exact,
-  [switch]$Strict, [string]$Lang, [switch]$UiaForce, [switch]$FgAuto, [switch]$BgForce, [int]$Max = 0
+  [switch]$Strict, [string]$Lang, [switch]$UiaForce, [switch]$FgAuto, [switch]$BgForce, [int]$Max = 0,
+  [string]$StateDir, [string]$Session, [string]$EnvFgAuto, [string]$EnvSlow,
+  [string]$EnvQuiet, [string]$EnvHeadless
 )
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+if ($StateDir) { $env:CU_STATE = $StateDir }
+if ($Session) { $env:CU_SESSION = $Session }
+if ($EnvFgAuto) { $env:CU_FG_AUTO = $EnvFgAuto }
+if ($EnvSlow) { $env:CU_SLOW = $EnvSlow }
+if ($EnvQuiet) { $env:CU_SETTLE_QUIET = $EnvQuiet }
+if ($EnvHeadless) { $env:CU_HEADLESS = $EnvHeadless }
 $script:here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:state = if ($env:CU_STATE) { $env:CU_STATE } else { Join-Path (Split-Path -Parent $script:here) "state" }
-$script:lastFrame = Join-Path $script:state "last.frame.json"
+$script:sessionSuffix = ""
+if ($env:CU_SESSION) {
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($env:CU_SESSION.Trim())); $script:sessionSuffix = ([BitConverter]::ToString($bytes, 0, 8)).Replace('-', '').ToLowerInvariant() }
+  finally { $sha.Dispose() }
+}
+$script:lastFrame = Join-Path $script:state $(if ($script:sessionSuffix) { "last.frame-$($script:sessionSuffix).json" } else { "last.frame.json" })
 $script:cfg = @{ MaxSide = 1568; MaxPixels = 1150000; Cap = 1.0; Quiet = 250 }   # defaults sized for typical multimodal input limits
 if ($env:CU_SETTLE_QUIET) { try { $script:cfg.Quiet = [int]$env:CU_SETTLE_QUIET } catch { } }
 $script:slowInput = ($env:CU_SLOW -eq "1")            # restore the pre-6.1 fixed waits
